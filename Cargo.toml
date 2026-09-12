@@ -1,0 +1,28 @@
+[workspace]
+members = ["crates/medousa-site-protocol", "crates/medousa-site-host"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+base64 = "0.22"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+iroh = "1.0"
+iroh-base = "1.0"
+iroh-tickets = "1.0"
+mime_guess = "2"
+percent-encoding = "2"
+postcard = { version = "1", features = ["alloc"] }
+rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "sync"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }

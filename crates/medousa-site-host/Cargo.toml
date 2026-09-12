@@ -1,0 +1,24 @@
+[package]
+name = "medousa-site-host"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+blake3.workspace = true
+clap.workspace = true
+dirs.workspace = true
+iroh.workspace = true
+iroh-tickets.workspace = true
+medousa-site-protocol = { path = "../medousa-site-protocol" }
+mime_guess.workspace = true
+percent-encoding.workspace = true
+rand.workspace = true
+subtle.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
