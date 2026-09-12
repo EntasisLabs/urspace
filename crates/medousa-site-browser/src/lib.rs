@@ -2,7 +2,7 @@
 
 use std::{str::FromStr, time::Duration};
 
-use iroh::{Endpoint, endpoint::presets};
+use iroh::{Endpoint, EndpointAddr, RelayMode, RelayUrl, TransportAddr, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
 use medousa_site_protocol::{
     ALPN, ClientHello, Header, INVITE_VERSION, RequestMethod, ServerHello, SiteRequest,
@@ -60,12 +60,20 @@ impl SiteClient {
         let capability = Zeroizing::new(std::mem::take(&mut invite.capability));
         let ticket = EndpointTicket::from_str(&invite.endpoint_ticket)
             .map_err(|error| JsError::new(&format!("invalid endpoint ticket: {error}")))?;
-        let endpoint = Endpoint::bind(presets::N0)
+        let endpoint_addr = normalize_relay_hosts(ticket.endpoint_addr())
+            .map_err(|error| JsError::new(&format!("invalid relay address: {error}")))?;
+        let relay_urls: Vec<_> = endpoint_addr.relay_urls().cloned().collect();
+        if relay_urls.is_empty() {
+            return Err(JsError::new("invitation does not contain a browser relay"));
+        }
+        let endpoint = Endpoint::builder(presets::N0)
+            .relay_mode(RelayMode::custom(relay_urls))
+            .bind()
             .await
             .map_err(|error| JsError::new(&format!("could not start Iroh: {error}")))?;
         let connection = match n0_future::time::timeout(
             SITE_CONNECT_TIMEOUT,
-            endpoint.connect(ticket.endpoint_addr().clone(), ALPN),
+            endpoint.connect(endpoint_addr, ALPN),
         )
         .await
         {
@@ -227,6 +235,62 @@ impl SiteClient {
 
     pub fn close(&self) {
         self.connection.close(0_u8.into(), b"browser closed");
+    }
+}
+
+fn normalize_relay_hosts(endpoint_addr: &EndpointAddr) -> Result<EndpointAddr, String> {
+    let addrs = endpoint_addr
+        .addrs
+        .iter()
+        .map(|addr| match addr {
+            TransportAddr::Relay(relay_url) => {
+                normalize_relay_host(relay_url).map(TransportAddr::Relay)
+            }
+            addr => Ok(addr.clone()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(EndpointAddr::from_parts(endpoint_addr.id, addrs))
+}
+
+fn normalize_relay_host(relay_url: &RelayUrl) -> Result<RelayUrl, String> {
+    let mut url: url::Url = relay_url.clone().into();
+    let Some(host) = url.host_str().map(ToOwned::to_owned) else {
+        return Ok(relay_url.clone());
+    };
+    let normalized = host.trim_end_matches('.');
+    if normalized == host {
+        return Ok(relay_url.clone());
+    }
+    if normalized.is_empty() {
+        return Err("relay hostname is empty after normalization".to_string());
+    }
+    url.set_host(Some(normalized))
+        .map_err(|_| "relay hostname could not be normalized".to_string())?;
+    Ok(RelayUrl::from(url))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_terminal_dot_from_relay_hosts_for_webkit() {
+        let relay: RelayUrl = "https://usw1-1.relay.n0.iroh.link./".parse().unwrap();
+        let endpoint = EndpointAddr::new(iroh::SecretKey::from_bytes(&[7_u8; 32]).public())
+            .with_relay_url(relay);
+
+        let normalized = normalize_relay_hosts(&endpoint).unwrap();
+
+        assert_eq!(
+            normalized.relay_urls().next().unwrap().to_string(),
+            "https://usw1-1.relay.n0.iroh.link/"
+        );
+    }
+
+    #[test]
+    fn leaves_already_normalized_relay_hosts_unchanged() {
+        let relay: RelayUrl = "https://relay.example.com/".parse().unwrap();
+        assert_eq!(normalize_relay_host(&relay).unwrap(), relay);
     }
 }
 

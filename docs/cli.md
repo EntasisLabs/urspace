@@ -37,11 +37,10 @@ its expiration or once its session budget has been consumed.
 
 ## Browser compatibility
 
-Chrome and Chromium are the tested browser path for the current preview. Safari
-can load the bootstrap but some releases cannot negotiate the N0 Iroh relay
-WebSocket. When that relay handshake times out, Urspace cancels the connection
-attempt without authorizing the invitation and asks the visitor to reopen the
-original invitation in Chrome.
+Chrome and Chromium are the primary tested browser path for the current preview.
+Urspace also normalizes Iroh relay hostnames for Safari, which rejects TLS relay
+URLs containing the DNS root's terminal dot. Failed relay handshakes are canceled
+without authorizing the invitation and produce a browser-specific recovery message.
 
 ## Static files
 

@@ -1,6 +1,6 @@
 import init, { SiteClient } from "/.medousa/wasm/medousa_site_browser.js";
 
-const BOOTSTRAP_REVISION = "v3-connection-diagnostics-1";
+const BOOTSTRAP_REVISION = "v4-webkit-relay-normalization-1";
 const RESERVED_PREFIX = "/.medousa/";
 const MAX_BROWSER_REQUEST_BYTES = 16 * 1024 * 1024;
 let client = null;
