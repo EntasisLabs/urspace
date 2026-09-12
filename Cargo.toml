@@ -3,6 +3,7 @@ members = [
     "crates/medousa-site-protocol",
     "crates/medousa-site-host",
     "crates/medousa-site-browser",
+    "crates/medousa-site-bootstrap",
 ]
 resolver = "3"
 
@@ -13,6 +14,7 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1"
+axum = "0.8"
 base64 = "0.22"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }

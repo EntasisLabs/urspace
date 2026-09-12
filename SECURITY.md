@@ -62,6 +62,10 @@ validation is defense in depth, not the authorization boundary.
 - The bootstrap origin is trusted executable code. A compromised deployment can
   read invitation fragments before they are cleared. Production requires pinned,
   reproducible loader artifacts and tightly controlled deployment credentials.
+- The production bootstrap validates that every content request uses exactly one
+  canonical Iroh public-key label under its configured base domain and serves
+  only an explicit asset allow-list. This reduces accidental hosting exposure;
+  it does not make altered bootstrap code trustworthy.
 - Static path confinement currently canonicalizes and then opens the file. This
   rejects traversal and ordinary symlink escapes but is not yet safe against a
   malicious local writer racing path resolution. Replace it with capability-based

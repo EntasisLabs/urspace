@@ -1,5 +1,6 @@
 import init, { SiteClient } from "/.medousa/wasm/medousa_site_browser.js";
 
+const BOOTSTRAP_REVISION = "v2-production-bootstrap-1";
 const RESERVED_PREFIX = "/.medousa/";
 const MAX_BROWSER_REQUEST_BYTES = 16 * 1024 * 1024;
 let client = null;
@@ -25,7 +26,12 @@ async function arm(message, port) {
     invitationUrl = "";
     client?.close();
     client = connected;
-    port.postMessage({ ok: true, entryPath: connected.entryPath, siteId: connected.siteId });
+    port.postMessage({
+      ok: true,
+      entryPath: connected.entryPath,
+      siteId: connected.siteId,
+      bootstrapRevision: BOOTSTRAP_REVISION,
+    });
   } catch (error) {
     invitationUrl = "";
     port.postMessage({ ok: false, error: error instanceof Error ? error.message : String(error) });

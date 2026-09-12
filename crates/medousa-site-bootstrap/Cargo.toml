@@ -1,0 +1,15 @@
+[package]
+name = "medousa-site-bootstrap"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+iroh-base = { workspace = true, features = ["key"] }
+tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -48,6 +48,7 @@ async function openSite() {
       type: "module",
       updateViaCache: "none",
     });
+    await registration.update();
     const worker = registration.installing || registration.waiting || registration.active;
     if (!worker) throw new Error("The site worker is unavailable.");
     await waitForWorker(worker);

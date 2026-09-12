@@ -99,3 +99,5 @@ is not persisted to IndexedDB, Cache Storage, cookies, or local storage; reopen
 the original invite to reconnect.
 
 See [SECURITY.md](SECURITY.md) before exposing a non-development bootstrap.
+The production container, wildcard DNS/TLS contract, verification steps, and
+operational rules are in [docs/bootstrap-deployment.md](docs/bootstrap-deployment.md).
