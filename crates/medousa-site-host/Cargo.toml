@@ -10,14 +10,18 @@ base64.workspace = true
 blake3.workspace = true
 clap.workspace = true
 dirs.workspace = true
+futures-util.workspace = true
 iroh.workspace = true
 iroh-tickets.workspace = true
 medousa-site-protocol = { path = "../medousa-site-protocol" }
 mime_guess.workspace = true
 percent-encoding.workspace = true
 rand.workspace = true
+reqwest.workspace = true
 subtle.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "sync"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite.workspace = true
+url.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]

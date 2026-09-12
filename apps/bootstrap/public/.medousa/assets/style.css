@@ -1,0 +1,15 @@
+:root {
+  color-scheme: dark;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  background: #090b0c;
+  color: #e7ece8;
+}
+
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; }
+body { display: grid; place-items: center; }
+main { width: min(32rem, calc(100% - 3rem)); }
+.eyebrow { color: #79e2a7; font-size: 0.72rem; font-weight: 750; letter-spacing: 0.16em; }
+h1 { margin: 0.5rem 0; font-size: clamp(1.8rem, 5vw, 3rem); }
+#status { color: #9aa8a0; }
+.failed #status { color: #ff9b91; }

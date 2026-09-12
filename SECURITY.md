@@ -36,6 +36,26 @@ validation is defense in depth, not the authorization boundary.
 - Browser code removes the fragment before remote HTML runs and zeroes mutable
   Rust copies after authorization. JavaScript strings cannot be reliably erased,
   so the bootstrap also drops its reference as soon as the WASM call returns.
+- The service worker retains the live client only in memory. It never writes the
+  invitation or capability into browser persistence.
+- Synthetic site responses are marked `Cache-Control: no-store`; neither the
+  capability nor proxied site content is intentionally persisted by the bootstrap.
+
+## Loopback proxy boundary
+
+- Dynamic apps must be explicitly exposed as an HTTP loopback origin. HTTPS,
+  LAN, Internet, credential-bearing, and path-bearing upstream URLs are rejected.
+- `localhost` is normalized to the numeric `127.0.0.1` address before requests,
+  avoiding ambient DNS resolution in the proxy boundary.
+- The upstream client does not follow redirects, preventing the local app from
+  redirecting the proxy into a different network authority.
+- Browser-controlled `Host`, connection, upgrade, transfer-encoding, and content
+  length headers are not forwarded.
+- Request bodies are limited to 16 MiB, response bodies to 64 MiB, and protocol
+  frames to 1 MiB. These are availability limits, not content trust decisions.
+- WebSocket upgrades are made only against the configured loopback authority.
+- Expiry and revocation are rechecked once per second on live WebSocket tunnels;
+  a withdrawn grant closes the browser and upstream sides with policy code 1008.
 
 ## Current limitations requiring hardening
 
@@ -48,14 +68,23 @@ validation is defense in depth, not the authorization boundary.
   directory handles before serving attacker-writable trees.
 - Capability state is memory-only. Restarting the host invalidates every invite
   (fail closed), and there is not yet a management socket for live revocation.
-- The browser bootstrap buffers a response up to 64 MiB. Streaming and stricter
-  content-specific limits are planned.
+- The browser and loopback proxy buffer each HTTP response up to 64 MiB. Streaming
+  responses, SSE, uploads larger than 16 MiB, and stricter content-specific
+  limits are not yet supported.
 - Browser Iroh endpoints are relay-only under current Web platform constraints.
+- Browsers may terminate an idle service worker. This intentionally loses the
+  in-memory capability and requires reopening the invite. An active BoxClub
+  WebSocket keeps the worker operation alive in tested browsers, but lifecycle
+  behavior must be tested across target browsers.
+- The WebSocket shim currently supports text/binary frames and close codes, but
+  not WebSocket subprotocol negotiation, extensions, or Blob sends.
+- An upstream CSP that disallows `/.medousa/assets/socket-shim.js` will preserve
+  its policy and therefore disable the compatibility shim. The bootstrap does
+  not silently weaken application CSP.
 
 ## Deliberate exclusions
 
 - No access to the Medousa daemon or its API surface
 - No arbitrary filesystem roots inferred from invitation data
-- No POST, PUT, DELETE, WebSocket, or server execution support
+- No arbitrary command execution or non-loopback reverse proxying
 - No ambient cookies or shared origin across site identities
-

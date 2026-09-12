@@ -5,18 +5,24 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use futures_util::{SinkExt as _, StreamExt as _};
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use medousa_site_protocol::{
-    ClientHello, DenialCode, RequestMethod, ServerHello, SiteRequest, SiteResponseHead, read_frame,
-    write_frame,
+    ClientHello, DenialCode, Header, RequestMethod, ServerHello, SiteRequest, SiteResponseHead,
+    SocketMessage, read_frame, write_frame,
 };
 use percent_encoding::percent_decode_str;
+use reqwest::redirect::Policy;
 use subtle::ConstantTimeEq as _;
 use tokio::sync::Semaphore;
+use tokio_tungstenite::tungstenite::Message;
+use url::Url;
 use uuid::Uuid;
 
 const MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 64;
+const MAX_REQUEST_BODY_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct InviteRecord {
@@ -101,6 +107,57 @@ pub struct StaticSite {
     root: Arc<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LoopbackSite {
+    http_origin: Url,
+    ws_origin: Url,
+    client: reqwest::Client,
+}
+
+impl LoopbackSite {
+    pub fn open(raw_origin: &str) -> Result<Self> {
+        let mut http_origin = Url::parse(raw_origin).context("parse loopback upstream")?;
+        let host = http_origin
+            .host_str()
+            .context("loopback upstream must have a host")?;
+        if http_origin.scheme() != "http"
+            || !matches!(host, "127.0.0.1" | "::1" | "[::1]" | "localhost")
+            || !http_origin.username().is_empty()
+            || http_origin.password().is_some()
+            || http_origin.query().is_some()
+            || http_origin.fragment().is_some()
+            || !matches!(http_origin.path(), "" | "/")
+        {
+            anyhow::bail!("upstream must be an HTTP loopback origin without a path or credentials");
+        }
+        if host == "localhost" {
+            http_origin
+                .set_host(Some("127.0.0.1"))
+                .map_err(|_| anyhow::anyhow!("could not normalize loopback upstream"))?;
+        }
+        http_origin.set_path("/");
+        let mut ws_origin = http_origin.clone();
+        ws_origin
+            .set_scheme("ws")
+            .map_err(|_| anyhow::anyhow!("could not derive WebSocket origin"))?;
+        let client = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .build()
+            .context("build loopback HTTP client")?;
+        Ok(Self {
+            http_origin,
+            ws_origin,
+            client,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+enum SiteSource {
+    Static(StaticSite),
+    Loopback(LoopbackSite),
+}
+
 impl StaticSite {
     pub async fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = tokio::fs::canonicalize(root.as_ref())
@@ -177,12 +234,22 @@ fn map_io_error(error: io::Error) -> ResolveError {
 #[derive(Debug, Clone)]
 pub struct SiteProtocol {
     registry: CapabilityRegistry,
-    site: StaticSite,
+    source: SiteSource,
 }
 
 impl SiteProtocol {
     pub fn new(registry: CapabilityRegistry, site: StaticSite) -> Self {
-        Self { registry, site }
+        Self {
+            registry,
+            source: SiteSource::Static(site),
+        }
+    }
+
+    pub fn loopback(registry: CapabilityRegistry, site: LoopbackSite) -> Self {
+        Self {
+            registry,
+            source: SiteSource::Loopback(site),
+        }
     }
 }
 
@@ -229,11 +296,11 @@ impl SiteProtocol {
                 .await
                 .context("request limit closed")?;
             let registry = self.registry.clone();
-            let site = self.site.clone();
+            let source = self.source.clone();
             let invite_id = hello.invite_id;
             tokio::spawn(async move {
                 let _permit = permit;
-                let _ = serve_request(registry, site, invite_id, send, recv).await;
+                let _ = serve_request(registry, source, invite_id, send, recv).await;
             });
         }
         Ok(())
@@ -242,26 +309,52 @@ impl SiteProtocol {
 
 async fn serve_request(
     registry: CapabilityRegistry,
-    site: StaticSite,
+    source: SiteSource,
     invite_id: Uuid,
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
 ) -> Result<()> {
     if !registry.session_is_active(invite_id, unix_now()) {
-        write_response_head(&mut send, 401, None, 0).await?;
+        write_response_head(&mut send, 401, None, 0, Vec::new()).await?;
         send.finish()?;
         return Ok(());
     }
     let request: SiteRequest = read_frame(&mut recv).await.context("read site request")?;
+    if request.body_length > MAX_REQUEST_BODY_BYTES {
+        write_response_head(&mut send, 413, None, 0, Vec::new()).await?;
+        send.finish()?;
+        return Ok(());
+    }
+    let mut body = vec![0_u8; request.body_length as usize];
+    tokio::io::AsyncReadExt::read_exact(&mut recv, &mut body).await?;
+    match source {
+        SiteSource::Static(site) => serve_static_request(site, request, send).await,
+        SiteSource::Loopback(site) if request.method == RequestMethod::WebSocket => {
+            serve_loopback_socket(registry, invite_id, site, request, send, recv).await
+        }
+        SiteSource::Loopback(site) => serve_loopback_http(site, request, body, send).await,
+    }
+}
+
+async fn serve_static_request(
+    site: StaticSite,
+    request: SiteRequest,
+    mut send: iroh::endpoint::SendStream,
+) -> Result<()> {
+    if !matches!(request.method, RequestMethod::Get | RequestMethod::Head) {
+        write_response_head(&mut send, 405, None, 0, Vec::new()).await?;
+        send.finish()?;
+        return Ok(());
+    }
     let resolved = match site.resolve(&request.path).await {
         Ok(path) => path,
         Err(ResolveError::Invalid | ResolveError::OutsideRoot) => {
-            write_response_head(&mut send, 403, None, 0).await?;
+            write_response_head(&mut send, 403, None, 0, Vec::new()).await?;
             send.finish()?;
             return Ok(());
         }
         Err(ResolveError::NotFound) => {
-            write_response_head(&mut send, 404, None, 0).await?;
+            write_response_head(&mut send, 404, None, 0, Vec::new()).await?;
             send.finish()?;
             return Ok(());
         }
@@ -272,7 +365,14 @@ async fn serve_request(
         .first_raw()
         .unwrap_or("application/octet-stream")
         .to_string();
-    write_response_head(&mut send, 200, Some(content_type), metadata.len()).await?;
+    write_response_head(
+        &mut send,
+        200,
+        Some(content_type),
+        metadata.len(),
+        Vec::new(),
+    )
+    .await?;
     if request.method == RequestMethod::Get {
         let mut file = tokio::fs::File::open(resolved).await?;
         tokio::io::copy(&mut file, &mut send).await?;
@@ -281,11 +381,194 @@ async fn serve_request(
     Ok(())
 }
 
+async fn serve_loopback_http(
+    site: LoopbackSite,
+    request: SiteRequest,
+    body: Vec<u8>,
+    mut send: iroh::endpoint::SendStream,
+) -> Result<()> {
+    let url = upstream_url(&site.http_origin, &request.path)?;
+    let method = match request.method {
+        RequestMethod::Get => reqwest::Method::GET,
+        RequestMethod::Head => reqwest::Method::HEAD,
+        RequestMethod::Post => reqwest::Method::POST,
+        RequestMethod::Put => reqwest::Method::PUT,
+        RequestMethod::Patch => reqwest::Method::PATCH,
+        RequestMethod::Delete => reqwest::Method::DELETE,
+        RequestMethod::Options => reqwest::Method::OPTIONS,
+        RequestMethod::WebSocket => unreachable!(),
+    };
+    let mut upstream = site.client.request(method, url).body(body);
+    for header in request.headers {
+        if let (Ok(name), Ok(value)) = (
+            reqwest::header::HeaderName::from_bytes(header.name.as_bytes()),
+            reqwest::header::HeaderValue::from_str(&header.value),
+        ) && !is_hop_by_hop(name.as_str())
+        {
+            upstream = upstream.header(name, value);
+        }
+    }
+    let response = match upstream.send().await {
+        Ok(response) => response,
+        Err(_) => {
+            write_response_head(&mut send, 502, None, 0, Vec::new()).await?;
+            send.finish()?;
+            return Ok(());
+        }
+    };
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let headers = response
+        .headers()
+        .iter()
+        .filter(|(name, _)| {
+            !is_hop_by_hop(name.as_str()) && *name != reqwest::header::CONTENT_LENGTH
+        })
+        .filter_map(|(name, value)| {
+            value.to_str().ok().map(|value| Header {
+                name: name.as_str().to_owned(),
+                value: value.to_owned(),
+            })
+        })
+        .collect();
+    let mut chunks = response.bytes_stream();
+    let mut bytes = Vec::new();
+    let mut too_large = false;
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.context("read loopback response")?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY_BYTES {
+            too_large = true;
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if too_large {
+        write_response_head(&mut send, 502, None, 0, Vec::new()).await?;
+    } else {
+        write_response_head(&mut send, status, content_type, bytes.len() as u64, headers).await?;
+        if request.method != RequestMethod::Head {
+            tokio::io::AsyncWriteExt::write_all(&mut send, &bytes).await?;
+        }
+    }
+    send.finish()?;
+    Ok(())
+}
+
+async fn serve_loopback_socket(
+    registry: CapabilityRegistry,
+    invite_id: Uuid,
+    site: LoopbackSite,
+    request: SiteRequest,
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+) -> Result<()> {
+    let url = upstream_url(&site.ws_origin, &request.path)?;
+    let (socket, _) = match tokio_tungstenite::connect_async(url.as_str()).await {
+        Ok(socket) => socket,
+        Err(_) => {
+            write_response_head(&mut send, 502, None, 0, Vec::new()).await?;
+            send.finish()?;
+            return Ok(());
+        }
+    };
+    write_response_head(&mut send, 101, None, 0, Vec::new()).await?;
+    let (mut socket_send, mut socket_recv) = socket.split();
+    let mut authorization_check = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            _ = authorization_check.tick() => {
+                if !registry.session_is_active(invite_id, unix_now()) {
+                    let close = SocketMessage::Close {
+                        code: Some(1008),
+                        reason: "Invitation expired or revoked".into(),
+                    };
+                    let _ = write_frame(&mut send, &close).await;
+                    let _ = socket_send.send(to_tungstenite(close)).await;
+                    break;
+                }
+            }
+            from_browser = read_frame::<_, SocketMessage>(&mut recv) => {
+                let Ok(message) = from_browser else { break };
+                socket_send.send(to_tungstenite(message)).await?;
+            }
+            from_upstream = socket_recv.next() => {
+                let Some(message) = from_upstream else { break };
+                let message = message?;
+                let Some(message) = from_tungstenite(message) else { continue };
+                let close = matches!(message, SocketMessage::Close { .. });
+                write_frame(&mut send, &message).await?;
+                if close { break; }
+            }
+        }
+    }
+    let _ = send.finish();
+    Ok(())
+}
+
+fn upstream_url(origin: &Url, path: &str) -> Result<Url> {
+    if !path.starts_with('/') || path.starts_with("//") || path.contains(['\r', '\n', '\\']) {
+        anyhow::bail!("invalid upstream path");
+    }
+    origin.join(path).context("build upstream URL")
+}
+
+fn is_hop_by_hop(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "host"
+            | "content-length"
+    )
+}
+
+fn to_tungstenite(message: SocketMessage) -> Message {
+    match message {
+        SocketMessage::Text(text) => Message::Text(text.into()),
+        SocketMessage::Binary(bytes) => Message::Binary(bytes.into()),
+        SocketMessage::Ping(bytes) => Message::Ping(bytes.into()),
+        SocketMessage::Pong(bytes) => Message::Pong(bytes.into()),
+        SocketMessage::Close { code, reason } => {
+            Message::Close(code.map(
+                |code| tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: code.into(),
+                    reason: reason.into(),
+                },
+            ))
+        }
+    }
+}
+
+fn from_tungstenite(message: Message) -> Option<SocketMessage> {
+    match message {
+        Message::Text(text) => Some(SocketMessage::Text(text.to_string())),
+        Message::Binary(bytes) => Some(SocketMessage::Binary(bytes.to_vec())),
+        Message::Ping(bytes) => Some(SocketMessage::Ping(bytes.to_vec())),
+        Message::Pong(bytes) => Some(SocketMessage::Pong(bytes.to_vec())),
+        Message::Close(frame) => Some(SocketMessage::Close {
+            code: frame.as_ref().map(|frame| frame.code.into()),
+            reason: frame.map_or_else(String::new, |frame| frame.reason.to_string()),
+        }),
+        Message::Frame(_) => None,
+    }
+}
+
 async fn write_response_head(
     send: &mut iroh::endpoint::SendStream,
     status: u16,
     content_type: Option<String>,
     content_length: u64,
+    headers: Vec<Header>,
 ) -> io::Result<()> {
     write_frame(
         send,
@@ -293,6 +576,7 @@ async fn write_response_head(
             status,
             content_type,
             content_length,
+            headers,
         },
     )
     .await
@@ -313,7 +597,7 @@ mod tests {
 
     fn hello(id: Uuid, capability: [u8; 32]) -> ClientHello {
         ClientHello {
-            version: 1,
+            version: medousa_site_protocol::INVITE_VERSION,
             invite_id: id,
             capability,
         }
@@ -368,6 +652,29 @@ mod tests {
             site.resolve("/missing").await,
             Err(ResolveError::NotFound)
         ));
+    }
+
+    #[test]
+    fn loopback_proxy_rejects_remote_or_ambiguous_origins() {
+        assert!(LoopbackSite::open("http://127.0.0.1:8787").is_ok());
+        assert!(LoopbackSite::open("http://[::1]:8787").is_ok());
+        assert!(LoopbackSite::open("http://localhost:8787").is_ok());
+        assert!(LoopbackSite::open("https://127.0.0.1:8787").is_err());
+        assert!(LoopbackSite::open("http://example.com:8787").is_err());
+        assert!(LoopbackSite::open("http://127.0.0.1:8787/api").is_err());
+    }
+
+    #[test]
+    fn upstream_paths_cannot_replace_the_loopback_authority() {
+        let origin = Url::parse("http://127.0.0.1:8787/").unwrap();
+        assert_eq!(
+            upstream_url(&origin, "/api/health?full=1")
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:8787/api/health?full=1"
+        );
+        assert!(upstream_url(&origin, "//attacker.example/path").is_err());
+        assert!(upstream_url(&origin, "/safe\\evil").is_err());
     }
 
     #[cfg(unix)]
@@ -429,6 +736,8 @@ mod tests {
             &SiteRequest {
                 method: RequestMethod::Get,
                 path: "/index.html".into(),
+                headers: Vec::new(),
+                body_length: 0,
             },
         )
         .await

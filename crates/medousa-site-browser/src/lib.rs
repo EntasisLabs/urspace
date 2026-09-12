@@ -5,10 +5,11 @@ use std::str::FromStr;
 use iroh::{Endpoint, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
 use medousa_site_protocol::{
-    ALPN, ClientHello, INVITE_VERSION, RequestMethod, ServerHello, SiteRequest, SiteResponseHead,
-    read_frame, verify_invite_url, write_frame,
+    ALPN, ClientHello, Header, INVITE_VERSION, RequestMethod, ServerHello, SiteRequest,
+    SiteResponseHead, SocketMessage, read_frame, verify_invite_url, write_frame,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use wasm_bindgen::{JsError, JsValue, prelude::wasm_bindgen};
 use zeroize::Zeroize;
 
@@ -18,7 +19,14 @@ const MAX_BOOTSTRAP_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 struct BrowserSiteResponse {
     status: u16,
     content_type: Option<String>,
+    headers: Vec<Header>,
     body: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserHeader {
+    name: String,
+    value: String,
 }
 
 #[wasm_bindgen]
@@ -99,7 +107,16 @@ impl SiteClient {
         self.site_id.clone()
     }
 
-    pub async fn fetch(&self, path: String) -> Result<JsValue, JsError> {
+    pub async fn fetch(
+        &self,
+        method: String,
+        path: String,
+        headers: JsValue,
+        body: Vec<u8>,
+    ) -> Result<JsValue, JsError> {
+        let method = parse_method(&method)?;
+        let headers: Vec<BrowserHeader> = serde_wasm_bindgen::from_value(headers)
+            .map_err(|error| JsError::new(&format!("invalid request headers: {error}")))?;
         let (mut send, mut recv) = self
             .connection
             .open_bi()
@@ -108,12 +125,23 @@ impl SiteClient {
         write_frame(
             &mut send,
             &SiteRequest {
-                method: RequestMethod::Get,
+                method,
                 path,
+                headers: headers
+                    .into_iter()
+                    .map(|header| Header {
+                        name: header.name,
+                        value: header.value,
+                    })
+                    .collect(),
+                body_length: body.len() as u64,
             },
         )
         .await
         .map_err(|error| JsError::new(&format!("request failed: {error}")))?;
+        tokio::io::AsyncWriteExt::write_all(&mut send, &body)
+            .await
+            .map_err(|error| JsError::new(&format!("request body failed: {error}")))?;
         send.finish()
             .map_err(|error| JsError::new(&format!("request failed: {error}")))?;
         let head: SiteResponseHead = read_frame(&mut recv)
@@ -126,12 +154,99 @@ impl SiteClient {
         serde_wasm_bindgen::to_value(&BrowserSiteResponse {
             status: head.status,
             content_type: head.content_type,
+            headers: head.headers,
             body,
         })
         .map_err(|error| JsError::new(&format!("response conversion failed: {error}")))
     }
 
+    #[wasm_bindgen(js_name = openSocket)]
+    pub async fn open_socket(&self, path: String) -> Result<SiteSocket, JsError> {
+        let (mut send, mut recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|error| JsError::new(&format!("socket stream failed: {error}")))?;
+        write_frame(
+            &mut send,
+            &SiteRequest {
+                method: RequestMethod::WebSocket,
+                path,
+                headers: Vec::new(),
+                body_length: 0,
+            },
+        )
+        .await
+        .map_err(|error| JsError::new(&format!("socket request failed: {error}")))?;
+        let head: SiteResponseHead = read_frame(&mut recv)
+            .await
+            .map_err(|error| JsError::new(&format!("socket response failed: {error}")))?;
+        if head.status != 101 {
+            return Err(JsError::new(&format!(
+                "site returned socket status {}",
+                head.status
+            )));
+        }
+        Ok(SiteSocket {
+            send: Mutex::new(send),
+            recv: Mutex::new(recv),
+        })
+    }
+
     pub fn close(&self) {
         self.connection.close(0_u8.into(), b"browser closed");
+    }
+}
+
+#[wasm_bindgen]
+pub struct SiteSocket {
+    send: Mutex<iroh::endpoint::SendStream>,
+    recv: Mutex<iroh::endpoint::RecvStream>,
+}
+
+#[wasm_bindgen]
+impl SiteSocket {
+    #[wasm_bindgen(js_name = sendText)]
+    pub async fn send_text(&self, text: String) -> Result<(), JsError> {
+        self.send_message(SocketMessage::Text(text)).await
+    }
+
+    #[wasm_bindgen(js_name = sendBinary)]
+    pub async fn send_binary(&self, bytes: Vec<u8>) -> Result<(), JsError> {
+        self.send_message(SocketMessage::Binary(bytes)).await
+    }
+
+    pub async fn receive(&self) -> Result<JsValue, JsError> {
+        let message: SocketMessage = read_frame(&mut *self.recv.lock().await)
+            .await
+            .map_err(|error| JsError::new(&format!("socket receive failed: {error}")))?;
+        serde_wasm_bindgen::to_value(&message)
+            .map_err(|error| JsError::new(&format!("socket conversion failed: {error}")))
+    }
+
+    pub async fn close(&self, code: Option<u16>, reason: String) -> Result<(), JsError> {
+        self.send_message(SocketMessage::Close { code, reason })
+            .await
+    }
+}
+
+impl SiteSocket {
+    async fn send_message(&self, message: SocketMessage) -> Result<(), JsError> {
+        write_frame(&mut *self.send.lock().await, &message)
+            .await
+            .map_err(|error| JsError::new(&format!("socket send failed: {error}")))
+    }
+}
+
+fn parse_method(method: &str) -> Result<RequestMethod, JsError> {
+    match method {
+        "GET" => Ok(RequestMethod::Get),
+        "HEAD" => Ok(RequestMethod::Head),
+        "POST" => Ok(RequestMethod::Post),
+        "PUT" => Ok(RequestMethod::Put),
+        "PATCH" => Ok(RequestMethod::Patch),
+        "DELETE" => Ok(RequestMethod::Delete),
+        "OPTIONS" => Ok(RequestMethod::Options),
+        _ => Err(JsError::new("unsupported request method")),
     }
 }

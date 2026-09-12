@@ -10,9 +10,10 @@ use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
-pub const ALPN: &[u8] = b"medousa-site/1";
-pub const INVITE_VERSION: u8 = 1;
-pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+pub const ALPN: &[u8] = b"medousa-site/2";
+pub const INVITE_VERSION: u8 = 2;
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+pub const BOOTSTRAP_PATH: &str = "/.medousa/open/";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvitePayload {
@@ -70,12 +71,26 @@ pub enum DenialCode {
 pub struct SiteRequest {
     pub method: RequestMethod,
     pub path: String,
+    pub headers: Vec<Header>,
+    pub body_length: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequestMethod {
     Get,
     Head,
+    Post,
+    Put,
+    Patch,
+    Delete,
+    Options,
+    WebSocket,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Header {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +98,16 @@ pub struct SiteResponseHead {
     pub status: u16,
     pub content_type: Option<String>,
     pub content_length: u64,
+    pub headers: Vec<Header>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SocketMessage {
+    Text(String),
+    Binary(Vec<u8>),
+    Ping(Vec<u8>),
+    Pong(Vec<u8>),
+    Close { code: Option<u16>, reason: String },
 }
 
 #[derive(Debug, Error)]
@@ -144,9 +169,9 @@ pub fn invite_url(encoded: &str) -> Result<Url, InviteError> {
     );
     url.set_host(Some(&host))
         .map_err(|_| InviteError::InvalidBootstrapUrl)?;
-    url.set_path("/");
+    url.set_path(BOOTSTRAP_PATH);
     url.set_query(None);
-    url.set_fragment(Some(&format!("m1={encoded}")));
+    url.set_fragment(Some(&format!("m2={encoded}")));
     Ok(url)
 }
 
@@ -154,7 +179,7 @@ pub fn verify_invite_url(raw: &str, now_unix: i64) -> Result<InvitePayload, Invi
     let url = Url::parse(raw).map_err(|_| InviteError::InvalidBootstrapUrl)?;
     let fragment = url.fragment().ok_or(InviteError::MissingFragment)?;
     let encoded = fragment
-        .strip_prefix("m1=")
+        .strip_prefix("m2=")
         .ok_or(InviteError::MissingFragment)?;
     let signed = decode_signed(encoded)?;
     verify_signed(&signed, now_unix)?;
@@ -163,7 +188,7 @@ pub fn verify_invite_url(raw: &str, now_unix: i64) -> Result<InvitePayload, Invi
     if url.scheme() != expected.scheme()
         || url.host_str() != expected.host_str()
         || url.port_or_known_default() != expected.port_or_known_default()
-        || url.path() != "/"
+        || url.path() != BOOTSTRAP_PATH
         || url.query().is_some()
     {
         return Err(InviteError::OriginMismatch);
@@ -312,6 +337,8 @@ mod tests {
     fn invitation_round_trips_and_binds_url_origin() {
         let (identity, encoded, capability) = fixture(2_000);
         let url = invite_url(&encoded).unwrap();
+        assert_eq!(url.path(), BOOTSTRAP_PATH);
+        assert!(url.fragment().unwrap().starts_with("m2="));
         let payload = verify_invite_url(url.as_str(), 1_000).unwrap();
         assert_eq!(payload.site_id, identity.public().to_z32());
         assert_eq!(payload.capability, capability);
@@ -330,7 +357,7 @@ mod tests {
     #[test]
     fn wrong_origin_and_expiry_are_rejected() {
         let (_, encoded, _) = fixture(2_000);
-        let wrong = format!("https://attacker.sites.example/#m1={encoded}");
+        let wrong = format!("https://attacker.sites.example/.medousa/open/#m2={encoded}");
         assert!(matches!(
             verify_invite_url(&wrong, 1_000),
             Err(InviteError::OriginMismatch)
@@ -347,7 +374,10 @@ mod tests {
         let payload = verify_encoded_invite(&encoded, 1_000).unwrap();
         assert_eq!(payload.bootstrap_origin, "https://sites.example");
 
-        let attacker = format!("https://{}.attacker.example/#m1={encoded}", payload.site_id);
+        let attacker = format!(
+            "https://{}.attacker.example/.medousa/open/#m2={encoded}",
+            payload.site_id
+        );
         assert!(matches!(
             verify_invite_url(&attacker, 1_000),
             Err(InviteError::OriginMismatch)

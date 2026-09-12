@@ -24,7 +24,6 @@ env CC_wasm32_unknown_unknown="${wasm_cc}" \
 
 wasm-bindgen \
   target/wasm32-unknown-unknown/release/medousa_site_browser.wasm \
-  --out-dir apps/bootstrap/public/wasm \
+  --out-dir apps/bootstrap/public/.medousa/wasm \
   --target web \
   --weak-refs
-

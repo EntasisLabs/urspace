@@ -4,10 +4,10 @@ use clap::{Parser, Subcommand};
 use iroh::protocol::Router;
 use iroh::{Endpoint, SecretKey, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
-use medousa_site_host::{CapabilityRegistry, SiteProtocol, StaticSite, unix_now};
+use medousa_site_host::{CapabilityRegistry, LoopbackSite, SiteProtocol, StaticSite, unix_now};
 use medousa_site_protocol::{
-    ALPN, ClientHello, InviteGrant, RequestMethod, ServerHello, SiteRequest, SiteResponseHead,
-    invite_url, read_frame, sign_invite, verify_invite_url, write_frame,
+    ALPN, ClientHello, INVITE_VERSION, InviteGrant, RequestMethod, ServerHello, SiteRequest,
+    SiteResponseHead, invite_url, read_frame, sign_invite, verify_invite_url, write_frame,
 };
 use rand::Rng as _;
 use std::io::Write as _;
@@ -26,6 +26,20 @@ struct Cli {
 enum Command {
     Serve {
         root: PathBuf,
+        #[arg(long)]
+        bootstrap_origin: String,
+        #[arg(long, default_value_t = 3600)]
+        ttl_seconds: u64,
+        #[arg(long, default_value_t = 8)]
+        max_sessions: u32,
+        #[arg(long, default_value = "/")]
+        entry_path: String,
+        #[arg(long)]
+        identity_file: Option<PathBuf>,
+    },
+    Proxy {
+        #[arg(long)]
+        upstream: String,
         #[arg(long)]
         bootstrap_origin: String,
         #[arg(long, default_value_t = 3600)]
@@ -65,12 +79,73 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Command::Proxy {
+            upstream,
+            bootstrap_origin,
+            ttl_seconds,
+            max_sessions,
+            entry_path,
+            identity_file,
+        } => {
+            proxy(
+                upstream,
+                bootstrap_origin,
+                ttl_seconds,
+                max_sessions,
+                entry_path,
+                identity_file,
+            )
+            .await
+        }
         Command::Get { invite_url, path } => get(&invite_url, &path).await,
     }
 }
 
 async fn serve(
     root: PathBuf,
+    bootstrap_origin: String,
+    ttl_seconds: u64,
+    max_sessions: u32,
+    entry_path: String,
+    identity_file: Option<PathBuf>,
+) -> Result<()> {
+    let site = StaticSite::open(root).await?;
+    serve_protocol(
+        SiteProtocol::new,
+        site,
+        bootstrap_origin,
+        ttl_seconds,
+        max_sessions,
+        entry_path,
+        identity_file,
+    )
+    .await
+}
+
+async fn proxy(
+    upstream: String,
+    bootstrap_origin: String,
+    ttl_seconds: u64,
+    max_sessions: u32,
+    entry_path: String,
+    identity_file: Option<PathBuf>,
+) -> Result<()> {
+    let site = LoopbackSite::open(&upstream)?;
+    serve_protocol(
+        SiteProtocol::loopback,
+        site,
+        bootstrap_origin,
+        ttl_seconds,
+        max_sessions,
+        entry_path,
+        identity_file,
+    )
+    .await
+}
+
+async fn serve_protocol<T>(
+    make_protocol: fn(CapabilityRegistry, T) -> SiteProtocol,
+    site: T,
     bootstrap_origin: String,
     ttl_seconds: u64,
     max_sessions: u32,
@@ -88,8 +163,6 @@ async fn serve(
         .await
         .context("bind Iroh endpoint")?;
     endpoint.online().await;
-
-    let site = StaticSite::open(root).await?;
     let registry = CapabilityRegistry::default();
     let invite_id = Uuid::new_v4();
     let capability: [u8; 32] = rand::rng().random();
@@ -112,7 +185,7 @@ async fn serve(
     )?;
     let url = invite_url(&encoded)?;
     let router = Router::builder(endpoint)
-        .accept(ALPN, SiteProtocol::new(registry, site))
+        .accept(ALPN, make_protocol(registry, site))
         .spawn();
 
     println!("Site identity: {}", identity.public().to_z32());
@@ -141,7 +214,7 @@ async fn get(raw_invite: &str, requested_path: &str) -> Result<()> {
     write_frame(
         &mut hello_send,
         &ClientHello {
-            version: 1,
+            version: INVITE_VERSION,
             invite_id: invite.invite_id,
             capability: invite.capability,
         },
@@ -164,6 +237,8 @@ async fn get(raw_invite: &str, requested_path: &str) -> Result<()> {
         &SiteRequest {
             method: RequestMethod::Get,
             path: path.to_string(),
+            headers: Vec::new(),
+            body_length: 0,
         },
     )
     .await?;
