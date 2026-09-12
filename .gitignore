@@ -3,4 +3,5 @@
 /.vscode/
 .DS_Store
 *.key
+/deploy/cloudflare/secrets/
 /apps/bootstrap/public/.medousa/wasm/

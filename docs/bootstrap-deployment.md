@@ -35,6 +35,10 @@ secret.
 
 ## Build and run
 
+For the current no-inbound-port Cloudflare deployment, follow
+[`deploy/cloudflare/README.md`](../deploy/cloudflare/README.md). It runs this
+container beside an outbound-only tunnel without publishing a VM port.
+
 From the repository root:
 
 ```bash
