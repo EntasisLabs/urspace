@@ -1750,6 +1750,7 @@ dependencies = [
  "iroh",
  "iroh-tickets",
  "medousa-site-protocol",
+ "n0-future",
  "serde",
  "serde-wasm-bindgen",
  "tokio",

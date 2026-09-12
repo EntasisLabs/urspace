@@ -1,6 +1,6 @@
 import init, { SiteClient } from "/.medousa/wasm/medousa_site_browser.js";
 
-const BOOTSTRAP_REVISION = "v2-production-bootstrap-1";
+const BOOTSTRAP_REVISION = "v3-connection-diagnostics-1";
 const RESERVED_PREFIX = "/.medousa/";
 const MAX_BROWSER_REQUEST_BYTES = 16 * 1024 * 1024;
 let client = null;
@@ -20,8 +20,10 @@ self.addEventListener("message", (event) => {
 async function arm(message, port) {
   let invitationUrl = String(message.invitationUrl || "");
   try {
+    port.postMessage({ type: "progress", stage: "loading-client" });
     wasmReady ||= init();
     await wasmReady;
+    port.postMessage({ type: "progress", stage: "connecting-relay" });
     const connected = await SiteClient.connect(invitationUrl, Number(message.nowUnix));
     invitationUrl = "";
     client?.close();

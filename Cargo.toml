@@ -25,6 +25,7 @@ iroh = { version = "1.0", default-features = false, features = ["tls-ring"] }
 iroh-base = "1.0"
 iroh-tickets = "1.0"
 mime_guess = "2"
+n0-future = "0.3"
 percent-encoding = "2"
 postcard = { version = "1", features = ["alloc"] }
 rand = "0.9"

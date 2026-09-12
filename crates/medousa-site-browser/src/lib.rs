@@ -1,6 +1,6 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
 use iroh::{Endpoint, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
@@ -11,9 +11,11 @@ use medousa_site_protocol::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use wasm_bindgen::{JsError, JsValue, prelude::wasm_bindgen};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const MAX_BOOTSTRAP_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const SITE_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const SITE_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Serialize)]
 struct BrowserSiteResponse {
@@ -55,36 +57,66 @@ impl SiteClient {
         };
         invitation_url.zeroize();
 
+        let capability = Zeroizing::new(std::mem::take(&mut invite.capability));
         let ticket = EndpointTicket::from_str(&invite.endpoint_ticket)
             .map_err(|error| JsError::new(&format!("invalid endpoint ticket: {error}")))?;
         let endpoint = Endpoint::bind(presets::N0)
             .await
             .map_err(|error| JsError::new(&format!("could not start Iroh: {error}")))?;
-        let connection = endpoint
-            .connect(ticket.endpoint_addr().clone(), ALPN)
-            .await
-            .map_err(|error| JsError::new(&format!("could not reach site: {error}")))?;
-
-        let (mut send, mut recv) = connection
-            .open_bi()
-            .await
-            .map_err(|error| JsError::new(&format!("authorization stream failed: {error}")))?;
-        write_frame(
-            &mut send,
-            &ClientHello {
-                version: INVITE_VERSION,
-                invite_id: invite.invite_id,
-                capability: invite.capability,
-            },
+        let connection = match n0_future::time::timeout(
+            SITE_CONNECT_TIMEOUT,
+            endpoint.connect(ticket.endpoint_addr().clone(), ALPN),
         )
         .await
-        .map_err(|error| JsError::new(&format!("authorization request failed: {error}")))?;
-        invite.capability.zeroize();
-        send.finish()
-            .map_err(|error| JsError::new(&format!("authorization request failed: {error}")))?;
-        let reply: ServerHello = read_frame(&mut recv)
+        {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                endpoint.close().await;
+                return Err(JsError::new(&format!("could not reach site: {error}")));
+            }
+            Err(_) => {
+                endpoint.close().await;
+                return Err(JsError::new(
+                    "Iroh relay connection timed out before the site could be reached",
+                ));
+            }
+        };
+
+        let authorize = async {
+            let (mut send, mut recv) = connection
+                .open_bi()
+                .await
+                .map_err(|error| JsError::new(&format!("authorization stream failed: {error}")))?;
+            write_frame(
+                &mut send,
+                &ClientHello {
+                    version: INVITE_VERSION,
+                    invite_id: invite.invite_id,
+                    capability: *capability,
+                },
+            )
             .await
-            .map_err(|error| JsError::new(&format!("authorization response failed: {error}")))?;
+            .map_err(|error| JsError::new(&format!("authorization request failed: {error}")))?;
+            send.finish()
+                .map_err(|error| JsError::new(&format!("authorization request failed: {error}")))?;
+            read_frame(&mut recv)
+                .await
+                .map_err(|error| JsError::new(&format!("authorization response failed: {error}")))
+        };
+        let reply: ServerHello =
+            match n0_future::time::timeout(SITE_AUTHORIZATION_TIMEOUT, authorize).await {
+                Ok(Ok(reply)) => reply,
+                Ok(Err(error)) => {
+                    connection.close(0_u8.into(), b"authorization failed");
+                    endpoint.close().await;
+                    return Err(error);
+                }
+                Err(_) => {
+                    connection.close(0_u8.into(), b"authorization timed out");
+                    endpoint.close().await;
+                    return Err(JsError::new("site authorization timed out"));
+                }
+            };
         if let ServerHello::Denied { code } = reply {
             return Err(JsError::new(&format!("site denied invitation: {code:?}")));
         }

@@ -35,6 +35,14 @@ mints a fresh random capability even when the site identity is reused.
 Press Ctrl+C to close the Iroh endpoint. The invitation also fails closed after
 its expiration or once its session budget has been consumed.
 
+## Browser compatibility
+
+Chrome and Chromium are the tested browser path for the current preview. Safari
+can load the bootstrap but some releases cannot negotiate the N0 Iroh relay
+WebSocket. When that relay handshake times out, Urspace cancels the connection
+attempt without authorizing the invitation and asks the visitor to reopen the
+original invitation in Chrome.
+
 ## Static files
 
 Static directories use the same capability and identity model:
