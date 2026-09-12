@@ -24,16 +24,25 @@ urspace serve localhost:8787 \
 
 - `--name` selects a stable local site identity. Names contain at most 64 ASCII
   letters, numbers, dashes, or underscores.
-- `--ttl` accepts whole seconds or a suffix of `s`, `m`, `h`, or `d`.
-- `--max-sessions` limits successful browser authorizations for that invitation.
+- `--ttl` controls how long the invitation accepts new browser sessions. It
+  accepts whole seconds or a suffix of `s`, `m`, `h`, or `d`.
+- `--max-sessions` limits unique browser endpoints admitted by that invitation.
+  Reconnecting the same in-memory browser endpoint does not consume another slot.
 - `--entry-path` chooses the first path the browser requests.
 
 Defaults are a one-hour lifetime, four successful browser connections, `/` as
 the entry path, and `https://urspace.online` as the bootstrap. Every invocation
 mints a fresh random capability even when the site identity is reused.
 
-Press Ctrl+C to close the Iroh endpoint. The invitation also fails closed after
-its expiration or once its session budget has been consumed.
+Expiration and the session budget are admission controls: they reject new
+browser connections but do not terminate a connection that was already
+authorized. An admitted browser remains connected until it closes the session,
+the host revokes it, the host stops sharing, or the underlying transport is
+lost. If that transport drops while the in-memory Urspace browser session is
+still alive, Urspace reconnects it with the same ephemeral Iroh identity—even
+after the admission window closes. Resumption remains bound to both that
+authenticated endpoint identity and the capability; neither is persisted to
+browser storage. Press Ctrl+C to close the Iroh endpoint and every active session.
 
 ## Browser compatibility
 

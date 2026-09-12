@@ -1,6 +1,6 @@
 import init, { SiteClient } from "/.medousa/wasm/medousa_site_browser.js";
 
-const BOOTSTRAP_REVISION = "v4-webkit-relay-normalization-1";
+const BOOTSTRAP_REVISION = "v5-sticky-sessions-1";
 const RESERVED_PREFIX = "/.medousa/";
 const MAX_BROWSER_REQUEST_BYTES = 16 * 1024 * 1024;
 let client = null;
@@ -64,12 +64,19 @@ async function meshFetch(request) {
     const headers = [];
     request.headers.forEach((value, name) => headers.push({ name, value }));
     const url = new URL(request.url);
-    const response = await client.fetch(
+    const fetchFromMesh = () => client.fetch(
       request.method,
       `${url.pathname}${url.search}`,
       headers,
       body,
     );
+    let response;
+    try {
+      response = await fetchFromMesh();
+    } catch (error) {
+      if (!["GET", "HEAD"].includes(request.method)) throw error;
+      response = await fetchFromMesh();
+    }
     const responseHeaders = new Headers();
     for (const header of response.headers || []) {
       if (!["content-length", "content-encoding", "transfer-encoding"].includes(header.name.toLowerCase())) {

@@ -37,7 +37,9 @@ urspace serve localhost:8787
 
 Urspace prints a signed, one-hour invitation under `urspace.online`. The
 recipient needs only a modern browser. The app stays on this machine, no inbound
-port is opened, and pressing Ctrl+C stops new traffic immediately.
+port is opened, and pressing Ctrl+C stops new traffic immediately. The hour is
+an admission window: browsers already connected remain authorized after it
+closes, while new connections are rejected.
 
 Use a stable local identity name and tighter invitation limits when desired:
 
@@ -59,6 +61,7 @@ See [docs/cli.md](docs/cli.md) for the complete preview command contract.
 - Same-origin browser `fetch` calls, including request bodies and response headers
 - Same-origin WebSockets through an injected standards-shaped browser shim
 - Vite/React bundles, client-side routes, and page-defined WebMCP tools
+- Automatic Iroh reconnection for already-admitted browser sessions
 - Expiring, revocable, session-limited invites
 
 The loopback proxy is intentionally limited to `http://127.0.0.1`,

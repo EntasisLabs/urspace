@@ -42,10 +42,10 @@ enum Command {
         /// Public Urspace bootstrap origin.
         #[arg(long, default_value = DEFAULT_BOOTSTRAP_ORIGIN)]
         bootstrap_origin: String,
-        /// Invitation lifetime, such as 10m, 1h, or 1d.
+        /// How long the invitation accepts new browser sessions.
         #[arg(long, default_value = DEFAULT_TTL, value_parser = parse_duration)]
         ttl: Duration,
-        /// Maximum successful browser connections for this invitation.
+        /// Maximum unique browser sessions admitted by this invitation.
         #[arg(long, default_value_t = DEFAULT_MAX_SESSIONS)]
         max_sessions: u32,
         /// Path opened when the recipient connects.
@@ -233,8 +233,8 @@ async fn serve_protocol<T>(
     println!("Urspace is serving {source_description}");
     println!("Nothing was uploaded; application traffic travels over Iroh.\n");
     println!("Share URL (treat it as a secret):\n{url}\n");
-    println!("Expires: in {}", format_duration(ttl));
-    println!("Maximum browser connections: {max_sessions}");
+    println!("Accepts new browser sessions for: {}", format_duration(ttl));
+    println!("Maximum admitted browser sessions: {max_sessions}");
     println!("Site identity: {}", identity.public().to_z32());
     println!("Press Ctrl+C to stop sharing.");
     tokio::signal::ctrl_c().await?;

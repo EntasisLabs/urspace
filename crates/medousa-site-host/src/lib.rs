@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt as _, StreamExt as _};
+use iroh::EndpointId;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use medousa_site_protocol::{
@@ -29,7 +30,21 @@ struct InviteRecord {
     capability_hash: [u8; 32],
     expires_at_unix: i64,
     remaining_sessions: u32,
+    admitted_endpoints: HashSet<EndpointId>,
     revoked: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorizedSession {
+    invite_id: Uuid,
+    endpoint_id: EndpointId,
+    invite_expires_at_unix: i64,
+}
+
+impl AuthorizedSession {
+    pub fn invite_expires_at_unix(self) -> i64 {
+        self.invite_expires_at_unix
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -49,6 +64,7 @@ impl CapabilityRegistry {
             capability_hash: capability_hash(capability),
             expires_at_unix,
             remaining_sessions: max_sessions,
+            admitted_endpoints: HashSet::new(),
             revoked: false,
         };
         self.inner
@@ -57,7 +73,12 @@ impl CapabilityRegistry {
             .insert(invite_id, record);
     }
 
-    pub fn authorize(&self, hello: &ClientHello, now_unix: i64) -> Result<i64, DenialCode> {
+    pub fn authorize(
+        &self,
+        hello: &ClientHello,
+        endpoint_id: EndpointId,
+        now_unix: i64,
+    ) -> Result<AuthorizedSession, DenialCode> {
         if hello.version != medousa_site_protocol::INVITE_VERSION {
             return Err(DenialCode::Invalid);
         }
@@ -70,6 +91,13 @@ impl CapabilityRegistry {
         if record.revoked {
             return Err(DenialCode::Revoked);
         }
+        if record.admitted_endpoints.contains(&endpoint_id) {
+            return Ok(AuthorizedSession {
+                invite_id: hello.invite_id,
+                endpoint_id,
+                invite_expires_at_unix: record.expires_at_unix,
+            });
+        }
         if record.expires_at_unix <= now_unix {
             return Err(DenialCode::Expired);
         }
@@ -77,15 +105,22 @@ impl CapabilityRegistry {
             return Err(DenialCode::SessionLimit);
         }
         record.remaining_sessions -= 1;
-        Ok(record.expires_at_unix)
+        record.admitted_endpoints.insert(endpoint_id);
+        Ok(AuthorizedSession {
+            invite_id: hello.invite_id,
+            endpoint_id,
+            invite_expires_at_unix: record.expires_at_unix,
+        })
     }
 
-    pub fn session_is_active(&self, invite_id: Uuid, now_unix: i64) -> bool {
+    pub fn session_is_active(&self, session: AuthorizedSession) -> bool {
         self.inner
             .lock()
             .expect("capability registry poisoned")
-            .get(&invite_id)
-            .is_some_and(|record| !record.revoked && record.expires_at_unix > now_unix)
+            .get(&session.invite_id)
+            .is_some_and(|record| {
+                !record.revoked && record.admitted_endpoints.contains(&session.endpoint_id)
+            })
     }
 
     pub fn revoke(&self, invite_id: Uuid) -> bool {
@@ -275,9 +310,11 @@ impl SiteProtocol {
             .await
             .context("read client authorization")?;
         let now = unix_now();
-        let authorization = self.registry.authorize(&hello, now);
+        let authorization = self.registry.authorize(&hello, connection.remote_id(), now);
         let reply = match authorization {
-            Ok(expires_at_unix) => ServerHello::Granted { expires_at_unix },
+            Ok(session) => ServerHello::Granted {
+                expires_at_unix: session.invite_expires_at_unix(),
+            },
             Err(code) => ServerHello::Denied { code },
         };
         write_frame(&mut hello_send, &reply)
@@ -286,9 +323,9 @@ impl SiteProtocol {
         hello_send
             .finish()
             .context("finish authorization response")?;
-        if authorization.is_err() {
+        let Ok(session) = authorization else {
             return Ok(());
-        }
+        };
 
         let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS_PER_CONNECTION));
         loop {
@@ -301,10 +338,9 @@ impl SiteProtocol {
                 .context("request limit closed")?;
             let registry = self.registry.clone();
             let source = self.source.clone();
-            let invite_id = hello.invite_id;
             tokio::spawn(async move {
                 let _permit = permit;
-                let _ = serve_request(registry, source, invite_id, send, recv).await;
+                let _ = serve_request(registry, source, session, send, recv).await;
             });
         }
         Ok(())
@@ -314,11 +350,11 @@ impl SiteProtocol {
 async fn serve_request(
     registry: CapabilityRegistry,
     source: SiteSource,
-    invite_id: Uuid,
+    session: AuthorizedSession,
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
 ) -> Result<()> {
-    if !registry.session_is_active(invite_id, unix_now()) {
+    if !registry.session_is_active(session) {
         write_response_head(&mut send, 401, None, 0, Vec::new()).await?;
         send.finish()?;
         return Ok(());
@@ -334,7 +370,7 @@ async fn serve_request(
     match source {
         SiteSource::Static(site) => serve_static_request(site, request, send).await,
         SiteSource::Loopback(site) if request.method == RequestMethod::WebSocket => {
-            serve_loopback_socket(registry, invite_id, site, request, send, recv).await
+            serve_loopback_socket(registry, session, site, request, send, recv).await
         }
         SiteSource::Loopback(site) => serve_loopback_http(site, request, body, send).await,
     }
@@ -464,7 +500,7 @@ async fn serve_loopback_http(
 
 async fn serve_loopback_socket(
     registry: CapabilityRegistry,
-    invite_id: Uuid,
+    session: AuthorizedSession,
     site: LoopbackSite,
     request: SiteRequest,
     mut send: iroh::endpoint::SendStream,
@@ -485,10 +521,10 @@ async fn serve_loopback_socket(
     loop {
         tokio::select! {
             _ = authorization_check.tick() => {
-                if !registry.session_is_active(invite_id, unix_now()) {
+                if !registry.session_is_active(session) {
                     let close = SocketMessage::Close {
                         code: Some(1008),
-                        reason: "Invitation expired or revoked".into(),
+                        reason: "Session revoked by host".into(),
                     };
                     let _ = write_frame(&mut send, &close).await;
                     let _ = socket_send.send(to_tungstenite(close)).await;
@@ -608,34 +644,51 @@ mod tests {
     }
 
     #[test]
-    fn registry_enforces_secret_expiry_revocation_and_session_limit() {
+    fn registry_enforces_admission_controls_without_expiring_active_sessions() {
         let registry = CapabilityRegistry::default();
         let id = Uuid::new_v4();
         let capability = [9_u8; 32];
+        let endpoint_a = SecretKey::generate().public();
+        let endpoint_b = SecretKey::generate().public();
         registry.insert(id, &capability, 200, 1);
 
         assert_eq!(
-            registry.authorize(&hello(id, [8_u8; 32]), 100),
+            registry.authorize(&hello(id, [8_u8; 32]), endpoint_a, 100),
             Err(DenialCode::Invalid)
         );
-        assert_eq!(registry.authorize(&hello(id, capability), 100), Ok(200));
+        let session = registry
+            .authorize(&hello(id, capability), endpoint_a, 100)
+            .unwrap();
+        assert_eq!(session.invite_expires_at_unix(), 200);
+        assert!(registry.session_is_active(session));
         assert_eq!(
-            registry.authorize(&hello(id, capability), 100),
+            registry.authorize(&hello(id, capability), endpoint_a, 200),
+            Ok(session)
+        );
+        assert_eq!(
+            registry.authorize(&hello(id, capability), endpoint_b, 100),
             Err(DenialCode::SessionLimit)
         );
+        assert_eq!(
+            registry.authorize(&hello(id, capability), endpoint_b, 200),
+            Err(DenialCode::Expired)
+        );
+        assert!(registry.session_is_active(session));
+        assert!(registry.revoke(id));
+        assert!(!registry.session_is_active(session));
 
         let revoked_id = Uuid::new_v4();
         registry.insert(revoked_id, &capability, 200, 2);
         assert!(registry.revoke(revoked_id));
         assert_eq!(
-            registry.authorize(&hello(revoked_id, capability), 100),
+            registry.authorize(&hello(revoked_id, capability), endpoint_a, 100),
             Err(DenialCode::Revoked)
         );
 
         let expired_id = Uuid::new_v4();
         registry.insert(expired_id, &capability, 100, 1);
         assert_eq!(
-            registry.authorize(&hello(expired_id, capability), 100),
+            registry.authorize(&hello(expired_id, capability), endpoint_a, 100),
             Err(DenialCode::Expired)
         );
     }
