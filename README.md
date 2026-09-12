@@ -23,7 +23,7 @@ pass a tag such as `v0.1.0` to install an exact release. The installer downloads
 through GitHub CLI and verifies the selected archive against the release's
 `SHA256SUMS` before installing it.
 
-Until the first tagged release, build the current private preview from source:
+To build the current private preview from source instead:
 
 ```bash
 cargo install --locked --path crates/medousa-site-host
