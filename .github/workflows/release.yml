@@ -1,0 +1,96 @@
+name: Release CLI
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - run: rustup default stable
+      - name: Require tag to match the CLI version
+        shell: bash
+        run: |
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "medousa-site-host") | .version')"
+          test "${GITHUB_REF_NAME}" = "v${package_version}"
+
+  unix:
+    needs: validate
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --target "${{ matrix.target }}"
+      - run: rustup default stable
+      - name: Build CLI
+        run: cargo build --release --locked -p medousa-site-host --bin urspace --target "${{ matrix.target }}"
+      - name: Package CLI
+        shell: bash
+        run: |
+          archive="urspace-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          staging="$(mktemp -d)"
+          trap 'rm -rf "${staging}"' EXIT
+          install -m 0755 "target/${{ matrix.target }}/release/urspace" "${staging}/urspace"
+          tar -C "${staging}" -czf "${archive}" urspace
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: urspace-${{ matrix.target }}
+          path: urspace-*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    needs: validate
+    runs-on: windows-latest
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --target $env:TARGET
+      - run: rustup default stable
+      - name: Build CLI
+        run: cargo build --release --locked -p medousa-site-host --bin urspace --target $env:TARGET
+      - name: Package CLI
+        shell: pwsh
+        run: |
+          $archive = "urspace-$env:GITHUB_REF_NAME-$env:TARGET.zip"
+          Compress-Archive -Path "target/$env:TARGET/release/urspace.exe" -DestinationPath $archive
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: urspace-x86_64-pc-windows-msvc
+          path: urspace-*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [unix, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum urspace-* > SHA256SUMS
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" artifacts/* --repo "${GITHUB_REPOSITORY}" --verify-tag --generate-notes

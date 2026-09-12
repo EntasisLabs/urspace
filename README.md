@@ -10,7 +10,20 @@ that decides where and how the browser connects.
 
 ## Install and share
 
-Build the current private preview:
+Private-preview releases are published for Apple Silicon and Intel macOS,
+Arm64 and x86-64 Linux, and x86-64 Windows. Collaborators authenticated with
+GitHub CLI can install the latest macOS or Linux build without a Rust toolchain:
+
+```bash
+./scripts/install-release.sh
+```
+
+Set `URSPACE_INSTALL_DIR` to choose a destination other than `~/.local/bin`, or
+pass a tag such as `v0.1.0` to install an exact release. The installer downloads
+through GitHub CLI and verifies the selected archive against the release's
+`SHA256SUMS` before installing it.
+
+Until the first tagged release, build the current private preview from source:
 
 ```bash
 cargo install --locked --path crates/medousa-site-host
