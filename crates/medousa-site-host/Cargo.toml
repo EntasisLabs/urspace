@@ -17,8 +17,8 @@ mime_guess.workspace = true
 percent-encoding.workspace = true
 rand.workspace = true
 subtle.workspace = true
-tokio.workspace = true
-uuid.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "sync"] }
+uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

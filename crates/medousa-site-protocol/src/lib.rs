@@ -224,8 +224,10 @@ fn verify_signed(signed: &SignedInvite, now_unix: i64) -> Result<(), InviteError
 
 fn normalize_bootstrap_origin(raw: &str) -> Result<String, InviteError> {
     let url = Url::parse(raw).map_err(|_| InviteError::InvalidBootstrapUrl)?;
-    if url.scheme() != "https"
-        || url.host_str().is_none()
+    let host = url.host_str().ok_or(InviteError::InvalidBootstrapUrl)?;
+    let secure_scheme = url.scheme() == "https"
+        || (url.scheme() == "http" && (host == "localhost" || host.ends_with(".localhost")));
+    if !secure_scheme
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
@@ -349,6 +351,18 @@ mod tests {
         assert!(matches!(
             verify_invite_url(&attacker, 1_000),
             Err(InviteError::OriginMismatch)
+        ));
+    }
+
+    #[test]
+    fn local_http_bootstrap_is_allowed_but_remote_http_is_not() {
+        assert_eq!(
+            normalize_bootstrap_origin("http://localhost:8080/").unwrap(),
+            "http://localhost:8080"
+        );
+        assert!(matches!(
+            normalize_bootstrap_origin("http://sites.example"),
+            Err(InviteError::InvalidBootstrapUrl)
         ));
     }
 }

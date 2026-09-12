@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/medousa-site-protocol", "crates/medousa-site-host"]
+members = [
+    "crates/medousa-site-protocol",
+    "crates/medousa-site-host",
+    "crates/medousa-site-browser",
+]
 resolver = "3"
 
 [workspace.package]
@@ -13,7 +17,8 @@ base64 = "0.22"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
-iroh = "1.0"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+iroh = { version = "1.0", default-features = false, features = ["tls-ring"] }
 iroh-base = "1.0"
 iroh-tickets = "1.0"
 mime_guess = "2"
@@ -23,6 +28,9 @@ rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 subtle = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1", default-features = false }
 url = "2"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["serde"] }
+wasm-bindgen = "=0.2.122"
+wasm-bindgen-futures = "0.4"
+zeroize = "1"

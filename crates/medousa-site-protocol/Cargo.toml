@@ -11,6 +11,6 @@ iroh-tickets.workspace = true
 postcard.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 url.workspace = true
 uuid.workspace = true

@@ -35,3 +35,26 @@ cargo run -p medousa-site-host -- get '<invite-url>' /index.html
 The bootstrap origin is only encoded into the invitation URL during this native
 phase. No public service is contacted by the CLI.
 
+## Browser transport spike
+
+The browser client validates the entire invitation before dialing, wipes its
+Rust-side copy of the URL and capability after authorization, and fetches the
+entry HTML over Iroh. The bootstrap removes the fragment from browser history
+before executing the fetched document in a sandboxed, opaque-origin iframe.
+
+For local development, loopback HTTP is allowed only under `localhost`; remote
+bootstrap origins must use HTTPS.
+
+```bash
+cd apps/bootstrap
+npm run build
+npm run serve
+```
+
+Then mint an invite with `--bootstrap-origin http://localhost:8080`. This phase
+supports a single-file HTML entry point. Transparent subresource loading is the
+next service-worker milestone.
+
+On macOS, building `ring` for the browser target requires a Clang with WebAssembly
+support. The build script automatically uses Homebrew LLVM when it is installed;
+otherwise set `CC_wasm32_unknown_unknown` to a suitable compiler.

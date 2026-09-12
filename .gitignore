@@ -3,4 +3,4 @@
 /.vscode/
 .DS_Store
 *.key
-
+/apps/bootstrap/public/wasm/
