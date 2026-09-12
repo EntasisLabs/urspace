@@ -11,22 +11,23 @@ small as possible.
 
 ## Domain and TLS contract
 
-Choose a dedicated base domain, such as `sites.example`. Each invitation uses
+The production Urspace base domain is `urspace.online`. Each invitation uses
 exactly one identity label beneath it:
 
 ```text
-https://<iroh-public-key>.sites.example/.medousa/open/#m2=<signed-invite>
+https://<iroh-public-key>.urspace.online/.medousa/open/#m2=<signed-invite>
 ```
 
 Provision:
 
-1. Wildcard DNS for `*.sites.example` pointing at the HTTPS edge.
-2. A certificate valid for `*.sites.example`.
+1. Wildcard DNS for `*.urspace.online` pointing at the HTTPS edge.
+2. A certificate valid for `*.urspace.online`.
 3. A reverse proxy that preserves the original `Host` header and forwards every
    wildcard host to the bootstrap container over a private network.
 
-A wildcard certificate covers the one-label site origins. The bare
-`sites.example` name is optional and requires its own certificate name if used.
+A wildcard certificate covers the one-label site origins. An exact DNS record
+for the bare `urspace.online` name takes precedence and can host a normal product
+site independently.
 
 The URL fragment is never included in an HTTP request, reverse-proxy log, or TLS
 request path. The site identity in the hostname is public; the fragment is the
@@ -41,7 +42,7 @@ docker build -f deploy/bootstrap/Dockerfile -t medousa-site-bootstrap .
 docker run --read-only --cap-drop=ALL \
   --publish 127.0.0.1:8080:8080 \
   medousa-site-bootstrap \
-  --base-domain sites.example
+  --base-domain urspace.online
 ```
 
 Terminate TLS at the reverse proxy and forward to `127.0.0.1:8080`, or place the
@@ -65,9 +66,9 @@ the public edge:
 
 ```bash
 curl --fail --show-error --head \
-  https://<site-id>.sites.example/.medousa/open/
+  https://<site-id>.urspace.online/.medousa/open/
 curl --fail --show-error \
-  https://<site-id>.sites.example/healthz
+  https://<site-id>.urspace.online/healthz
 ```
 
 Confirm the first response is HTML, is not cacheable, includes the security
@@ -82,10 +83,9 @@ origin when minting:
 
 ```bash
 cd /Users/theelevators/medousa/medousa-sites
-cargo run -p medousa-site-host -- proxy \
-  --upstream http://127.0.0.1:8787 \
-  --bootstrap-origin https://sites.example \
-  --ttl-seconds 3600 \
+cargo run -p medousa-site-host --bin urspace -- serve localhost:8787 \
+  --name boxclub \
+  --ttl 1h \
   --max-sessions 4
 ```
 

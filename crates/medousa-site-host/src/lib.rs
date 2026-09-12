@@ -150,6 +150,10 @@ impl LoopbackSite {
             client,
         })
     }
+
+    pub fn origin(&self) -> &str {
+        self.http_origin.as_str()
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -1,4 +1,4 @@
-# Medousa Sites
+# Urspace
 
 Capability-addressed web apps served from a private machine over Iroh. The
 browser receives a signed, expiring invite URL; a generic bootstrap verifies it,
@@ -7,6 +7,37 @@ connects to the named Iroh endpoint, and exposes the app at an isolated origin.
 Protocol knowledge is not an authorization factor. Access requires the random
 256-bit capability in the URL fragment, and the endpoint key signs every field
 that decides where and how the browser connects.
+
+## Install and share
+
+Build the current private preview:
+
+```bash
+cargo install --locked --path crates/medousa-site-host
+```
+
+Share an app already listening on loopback:
+
+```bash
+urspace serve localhost:8787
+```
+
+Urspace prints a signed, one-hour invitation under `urspace.online`. The
+recipient needs only a modern browser. The app stays on this machine, no inbound
+port is opened, and pressing Ctrl+C stops new traffic immediately.
+
+Use a stable local identity name and tighter invitation limits when desired:
+
+```bash
+urspace serve localhost:8787 --name boxclub --ttl 10m --max-sessions 1
+```
+
+`--name` selects a persistent local signing identity. Every command invocation
+still creates a new random capability, invite ID, expiry, and session budget.
+Identity keys are stored in the platform-local application data directory under
+`urspace/sites` with private file permissions.
+
+See [docs/cli.md](docs/cli.md) for the complete preview command contract.
 
 ## What works
 
@@ -53,10 +84,10 @@ Then mint the invite and keep the proxy running:
 
 ```bash
 cd /Users/theelevators/medousa/medousa-sites
-cargo run -p medousa-site-host -- proxy \
-  --upstream http://127.0.0.1:8787 \
+cargo run -p medousa-site-host --bin urspace -- serve localhost:8787 \
   --bootstrap-origin http://localhost:8080 \
-  --ttl-seconds 3600 \
+  --name boxclub \
+  --ttl 1h \
   --max-sessions 4
 ```
 
@@ -66,24 +97,22 @@ WebMCP HTTP fallback all traverse the authenticated Iroh connection.
 
 `localhost` is a same-machine development bootstrap. To share an invite with
 another device, deploy `apps/bootstrap/public` as immutable static files behind
-an HTTPS wildcard origin, then mint with that exact origin. For example, a
-bootstrap at `https://sites.example` must route
-`https://<site-id>.sites.example/.medousa/open/` and serve a wildcard TLS
+the `https://urspace.online` wildcard origin. It must route
+`https://<site-id>.urspace.online/.medousa/open/` and serve a wildcard TLS
 certificate. The bootstrap is generic and never receives the fragment over
 HTTP; fragments stay client-side.
 
 ## Static sites
 
 ```bash
-cargo run -p medousa-site-host -- serve ./public \
-  --bootstrap-origin https://sites.example \
+cargo run -p medousa-site-host --bin urspace -- static ./public \
   --entry-path /index.html
 ```
 
 The native diagnostic client uses the same invite verification and transport:
 
 ```bash
-cargo run -p medousa-site-host -- get '<invite-url>' /index.html
+cargo run -p medousa-site-host --bin urspace -- get '<invite-url>' /index.html
 ```
 
 ## Browser boundary

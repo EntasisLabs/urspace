@@ -43,6 +43,12 @@ validation is defense in depth, not the authorization boundary.
 
 ## Loopback proxy boundary
 
+- `urspace serve` canonicalizes shorthand such as `localhost:8787` before Iroh
+  starts. Its parser rejects remote hosts, credentials, paths, queries, and
+  fragments rather than passing ambiguous input into the proxy.
+- Named and source-derived site identities persist locally, but every run mints
+  a fresh 256-bit capability and invite ID. Treat the printed URL as a bearer
+  secret until it expires.
 - Dynamic apps must be explicitly exposed as an HTTP loopback origin. HTTPS,
   LAN, Internet, credential-bearing, and path-bearing upstream URLs are rejected.
 - `localhost` is normalized to the numeric `127.0.0.1` address before requests,

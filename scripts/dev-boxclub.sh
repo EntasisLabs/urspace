@@ -50,8 +50,8 @@ curl --fail --silent "http://127.0.0.1:${boxclub_port}/api/health" >/dev/null
 
 echo "Minting a 1-hour BoxClub invite. Press Ctrl+C to stop all three processes."
 cd "${repo_root}"
-cargo run -p medousa-site-host -- proxy \
-  --upstream "http://127.0.0.1:${boxclub_port}" \
+cargo run -p medousa-site-host --bin urspace -- serve "localhost:${boxclub_port}" \
   --bootstrap-origin "http://localhost:${bootstrap_port}" \
-  --ttl-seconds 3600 \
+  --name boxclub \
+  --ttl 1h \
   --max-sessions 4
