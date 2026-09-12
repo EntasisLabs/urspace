@@ -4,5 +4,4 @@
 target
 node_modules
 *.key
-deploy/cloudflare/secrets
 .DS_Store

@@ -3,5 +3,7 @@
 /.vscode/
 .DS_Store
 *.key
-/deploy/cloudflare/secrets/
+/deploy/cloudflare-worker/node_modules/
+/deploy/cloudflare-worker/.wrangler/
+/deploy/cloudflare-worker/.wrangler-dist/
 /apps/bootstrap/public/.medousa/wasm/

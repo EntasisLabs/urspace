@@ -5,9 +5,9 @@ Its job is to deliver a small audited browser client at a unique origin for each
 Iroh site identity.
 
 This component is security-sensitive: whoever can change its JavaScript or WASM
-can read future invitation fragments. Deploy a reviewed image by digest, tightly
-limit deployment credentials, and keep the TLS/reverse-proxy configuration as
-small as possible.
+can read future invitation fragments. Deploy a reviewed source revision, record
+the resulting Worker version or container digest, tightly limit deployment
+credentials, and keep the edge configuration as small as possible.
 
 ## Domain and TLS contract
 
@@ -18,7 +18,11 @@ exactly one identity label beneath it:
 https://<iroh-public-key>.urspace.online/.medousa/open/#m2=<signed-invite>
 ```
 
-Provision:
+For the default Urspace deployment, Cloudflare provisions wildcard TLS and runs
+the bootstrap Worker directly at the edge. Create a proxied wildcard DNS record
+and follow [`deploy/cloudflare-worker/README.md`](../deploy/cloudflare-worker/README.md).
+
+For a fully self-hosted edge, provision:
 
 1. Wildcard DNS for `*.urspace.online` pointing at the HTTPS edge.
 2. A certificate valid for `*.urspace.online`.
@@ -35,11 +39,10 @@ secret.
 
 ## Build and run
 
-For the current no-inbound-port Cloudflare deployment, follow
-[`deploy/cloudflare/README.md`](../deploy/cloudflare/README.md). It runs this
-container beside an outbound-only tunnel without publishing a VM port.
+Cloudflare users do not need this container or a VM. The Worker deployment above
+serves the same built assets without an origin server or tunnel.
 
-From the repository root:
+For a self-hosted edge, from the repository root:
 
 ```bash
 docker build -f deploy/bootstrap/Dockerfile -t medousa-site-bootstrap .
@@ -93,9 +96,10 @@ cargo run -p medousa-site-host --bin urspace -- serve localhost:8787 \
   --max-sessions 4
 ```
 
-The recipient loads only the generic bootstrap from the HTTPS edge. The
-bootstrap validates the signature, URL origin, Iroh identity, endpoint ticket,
-expiry, and capability locally before it dials the BoxClub host over Iroh.
+The recipient loads only the generic bootstrap from the HTTPS edge. Cloudflare
+does not proxy BoxClub or the Iroh stream. The bootstrap validates the signature,
+URL origin, Iroh identity, endpoint ticket, expiry, and capability locally before
+it dials the BoxClub host over Iroh.
 
 ## Operational rules
 
