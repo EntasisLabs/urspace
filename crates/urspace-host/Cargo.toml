@@ -36,4 +36,5 @@ uuid = { workspace = true, features = ["v4"] }
 zeroize.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile = "3"

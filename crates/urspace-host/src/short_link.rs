@@ -151,28 +151,50 @@ fn short_link_aad(expires_at_unix: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ShortLinkVector {
+        seed: String,
+        nonce: String,
+        expires_at_unix: i64,
+        invitation_url: String,
+        lookup: String,
+        ciphertext: String,
+    }
 
     #[test]
     fn sealing_has_a_stable_cross_language_vector() {
-        let seed = [7_u8; 32];
-        // Fixed public test data is required for this cross-language known-answer vector.
-        // codeql[rust/hard-coded-cryptographic-value]
-        let nonce = [9_u8; 12];
+        let fixture_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/short-link-v1.json");
+        let fixture: ShortLinkVector = serde_json::from_str(
+            &std::fs::read_to_string(fixture_path).expect("read shared short-link fixture"),
+        )
+        .expect("parse shared short-link fixture");
+        let seed: [u8; 32] = URL_SAFE_NO_PAD
+            .decode(&fixture.seed)
+            .expect("decode fixture seed")
+            .try_into()
+            .expect("fixture seed has 32 bytes");
+        let nonce: [u8; 12] = URL_SAFE_NO_PAD
+            .decode(&fixture.nonce)
+            .expect("decode fixture nonce")
+            .try_into()
+            .expect("fixture nonce has 12 bytes");
         let (lookup, envelope) = seal_invite(
-            "https://3mied18mppzo5rm16uzw5s6rxakceay3snhimxph3yjqi5tkdy8o.urspace.online/.urspace/open/#u3=fixture",
-            2_000_000_000,
+            &fixture.invitation_url,
+            fixture.expires_at_unix,
             &seed,
             nonce,
         )
         .unwrap();
 
-        assert_eq!(lookup, "cBr_kIlOrtVJaefP5s3yIg");
-        assert_eq!(envelope.nonce, "CQkJCQkJCQkJCQkJ");
-        assert_eq!(
-            envelope.ciphertext,
-            "mf0-gJGTa1ppw25HRCQxKBIwIdVgvWUKj-JJosiiYT-RbWfShCxhUweiI4fp4rXwdV64Mm86dyvI7O6jUeuBsKOFeZve7Wv9UauF5yccIpcHJnnjav7maC_oM-7HaK8dWywStrY7WHsuWc8UIvTK6QPIrje-"
-        );
+        assert_eq!(lookup, fixture.lookup);
+        assert_eq!(envelope.nonce, fixture.nonce);
+        assert_eq!(envelope.ciphertext, fixture.ciphertext);
     }
 
     #[test]

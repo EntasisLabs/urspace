@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -9,6 +10,9 @@ import {
 
 const SAFARI = "Mozilla/5.0 AppleWebKit/605.1.15 Version/26.0 Safari/605.1.15";
 const CHROME = "Mozilla/5.0 AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36";
+const SHORT_LINK_VECTOR = JSON.parse(
+  readFileSync(new URL("../../../testdata/short-link-v1.json", import.meta.url), "utf8"),
+);
 
 test("identifies Safari without mistaking Chromium for Safari", () => {
   assert.equal(isSafari(SAFARI), true);
@@ -38,36 +42,32 @@ test("keeps non-Safari relay and protocol failures distinct", () => {
 });
 
 test("decrypts Rust short-link envelopes without exposing the seed to HTTP", async () => {
-  const invitationUrl =
-    "https://3mied18mppzo5rm16uzw5s6rxakceay3snhimxph3yjqi5tkdy8o.urspace.online/.urspace/open/#u3=fixture";
   const result = await decryptShortInvite(
-    "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+    SHORT_LINK_VECTOR.seed,
     {
       version: 1,
-      expiresAtUnix: 2_000_000_000,
-      nonce: "CQkJCQkJCQkJCQkJ",
-      ciphertext:
-        "mf0-gJGTa1ppw25HRCQxKBIwIdVgvWUKj-JJosiiYT-RbWfShCxhUweiI4fp4rXwdV64Mm86dyvI7O6jUeuBsKOFeZve7Wv9UauF5yccIpcHJnnjav7maC_oM-7HaK8dWywStrY7WHsuWc8UIvTK6QPIrje-",
+      expiresAtUnix: SHORT_LINK_VECTOR.expiresAtUnix,
+      nonce: SHORT_LINK_VECTOR.nonce,
+      ciphertext: SHORT_LINK_VECTOR.ciphertext,
     },
     "u.urspace.online",
     1_000_000_000,
   );
 
-  assert.equal(result.lookup, "cBr_kIlOrtVJaefP5s3yIg");
-  assert.equal(result.invitationUrl, invitationUrl);
+  assert.equal(result.lookup, SHORT_LINK_VECTOR.lookup);
+  assert.equal(result.invitationUrl, SHORT_LINK_VECTOR.invitationUrl);
 });
 
 test("rejects tampered or cross-service short-link envelopes", async () => {
   const envelope = {
     version: 1,
-    expiresAtUnix: 2_000_000_000,
-    nonce: "CQkJCQkJCQkJCQkJ",
-    ciphertext:
-      "mf0-gJGTa1ppw25HRCQxKBIwIdVgvWUKj-JJosiiYT-RbWfShCxhUweiI4fp4rXwdV64Mm86dyvI7O6jUeuBsKOFeZve7Wv9UauF5yccIpcHJnnjav7maC_oM-7HaK8dWywStrY7WHsuWc8UIvTK6QPIrjeA",
+    expiresAtUnix: SHORT_LINK_VECTOR.expiresAtUnix,
+    nonce: SHORT_LINK_VECTOR.nonce,
+    ciphertext: `${SHORT_LINK_VECTOR.ciphertext.slice(0, -1)}A`,
   };
   await assert.rejects(
     decryptShortInvite(
-      "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      SHORT_LINK_VECTOR.seed,
       envelope,
       "u.urspace.online",
       1_000_000_000,
@@ -80,8 +80,7 @@ test("rejects tampered or cross-service short-link envelopes", async () => {
       "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
       {
         ...envelope,
-        ciphertext:
-          "mf0-gJGTa1ppw25HRCQxKBIwIdVgvWUKj-JJosiiYT-RbWfShCxhUweiI4fp4rXwdV64Mm86dyvI7O6jUeuBsKOFeZve7Wv9UauF5yccIpcHJnnjav7maC_oM-7HaK8dWywStrY7WHsuWc8UIvTK6QPIrje-",
+        ciphertext: SHORT_LINK_VECTOR.ciphertext,
       },
       "u.example.com",
       1_000_000_000,
