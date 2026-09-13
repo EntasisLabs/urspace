@@ -48,11 +48,23 @@ validation is defense in depth, not the authorization boundary.
   so reopening the known URL under a new ephemeral endpoint cannot regain access.
 - Revocation is consulted for every request, including requests on an already
   authorized connection.
-- Browser code removes the fragment before remote HTML runs and zeroes mutable
-  Rust copies after authorization. JavaScript strings cannot be reliably erased,
-  so the bootstrap also drops its reference as soon as the WASM call returns.
-- The service worker retains the live client only in memory. It never writes the
-  invitation or capability into browser persistence.
+- Browser code removes the invitation fragment before remote HTML runs and
+  zeroes mutable Rust copies after authorization. JavaScript strings cannot be
+  reliably erased.
+- The service worker and the first injected Urspace script retain a resume
+  handoff only in memory. The handoff contains the signed invitation and the
+  browser endpoint identity needed to reconnect as the already-admitted session.
+  It is carried only on navigation responses in a one-time data attribute on a
+  tiny inline bootstrap. The worker authorizes that bootstrap with a fresh CSP
+  nonce, the bootstrap captures the handoff before application scripts run,
+  removes its element, and answers only trusted service-worker messages through
+  a transferred port. Ordinary application fetches never receive the handoff;
+  ambiguous or combined CSP policies omit it and fail closed.
+- No invitation, capability, endpoint secret, or resume handoff is written to
+  `localStorage`, `sessionStorage`, IndexedDB, the Cache API, or cookies. A
+  restarted service worker accepts a handoff only for its exact site origin, and
+  the host still verifies capability possession, admitted endpoint identity,
+  revocation, and kicks.
 - Synthetic site responses are marked `Cache-Control: no-store`; neither the
   capability nor proxied site content is intentionally persisted by the bootstrap.
 
@@ -123,10 +135,11 @@ operator console and do not depend on this service.
 - A short link adds a centralized first-open availability dependency. If the
   resolver is unavailable, recipients need the direct invitation printed by the
   `raw` console command. Application traffic never traverses the resolver.
-- Browsers may terminate an idle service worker. This intentionally loses the
-  in-memory capability and requires reopening the invite. An active BoxClub
-  WebSocket keeps the worker operation alive in tested browsers, but lifecycle
-  behavior must be tested across target browsers.
+- Service-worker eviction can be recovered while at least one controlled
+  Urspace page remains alive. Full page discard, closing every site page long
+  enough for the worker to terminate, or a browser process restart destroys the
+  in-memory handoff and requires reopening the invitation. Lifecycle behavior
+  still needs testing across target browsers.
 - The WebSocket shim currently supports text/binary frames and close codes, but
   not WebSocket subprotocol negotiation, extensions, or Blob sends.
 - An upstream CSP that disallows `/.urspace/assets/socket-shim.js` will preserve

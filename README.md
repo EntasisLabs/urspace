@@ -49,7 +49,9 @@ Urspace prints a signed, one-hour invitation under `urspace.online`. The
 recipient needs only a modern browser. The app stays on this machine, no inbound
 port is opened, and pressing Ctrl+C stops new traffic immediately. The hour is
 an admission window: browsers already connected remain authorized after it
-closes, while new connections are rejected.
+closes, while new connections are rejected. If the browser evicts the idle
+service worker, a still-open Urspace page restores the same admitted Iroh
+identity from tab memory; the bearer secret is never written to browser storage.
 
 For a compact share URL, explicitly opt into encrypted shortening:
 
@@ -95,7 +97,7 @@ See [docs/cli.md](docs/cli.md) for the complete command contract.
 - Same-origin browser `fetch` calls, including request bodies and response headers
 - Same-origin WebSockets through an injected standards-shaped browser shim
 - Vite/React bundles, client-side routes, and page-defined WebMCP tools
-- Automatic Iroh reconnection for already-admitted browser sessions
+- Automatic Iroh reconnection and service-worker recovery for admitted sessions
 - Expiring, revocable, session-limited invites
 - Optional end-to-end encrypted short links with direct-link fallback
 

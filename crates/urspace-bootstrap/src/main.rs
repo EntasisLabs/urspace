@@ -79,6 +79,7 @@ impl BootstrapAssets {
 enum Asset {
     Open,
     Main,
+    Session,
     SocketShim,
     Style,
     ServiceWorker,
@@ -87,9 +88,10 @@ enum Asset {
 }
 
 impl Asset {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Open,
         Self::Main,
+        Self::Session,
         Self::SocketShim,
         Self::Style,
         Self::ServiceWorker,
@@ -101,6 +103,7 @@ impl Asset {
         match path {
             "/.urspace/open/" | "/.medousa/open/" => Some(Self::Open),
             "/.urspace/assets/main.js" | "/.medousa/assets/main.js" => Some(Self::Main),
+            "/.urspace/assets/session.js" | "/.medousa/assets/session.js" => Some(Self::Session),
             "/.urspace/assets/socket-shim.js" | "/.medousa/assets/socket-shim.js" => {
                 Some(Self::SocketShim)
             }
@@ -120,6 +123,7 @@ impl Asset {
         match self {
             Self::Open => ".urspace/open/index.html",
             Self::Main => ".urspace/assets/main.js",
+            Self::Session => ".urspace/assets/session.js",
             Self::SocketShim => ".urspace/assets/socket-shim.js",
             Self::Style => ".urspace/assets/style.css",
             Self::ServiceWorker => "sw.js",
@@ -131,9 +135,11 @@ impl Asset {
     fn content_type(self) -> &'static str {
         match self {
             Self::Open => "text/html; charset=utf-8",
-            Self::Main | Self::SocketShim | Self::ServiceWorker | Self::WasmGlue => {
-                "text/javascript; charset=utf-8"
-            }
+            Self::Main
+            | Self::Session
+            | Self::SocketShim
+            | Self::ServiceWorker
+            | Self::WasmGlue => "text/javascript; charset=utf-8",
             Self::Style => "text/css; charset=utf-8",
             Self::WasmModule => "application/wasm",
         }
@@ -361,6 +367,7 @@ mod tests {
     #[test]
     fn serves_only_the_explicit_bootstrap_surface() {
         assert!(Asset::from_uri_path("/.urspace/open/").is_some());
+        assert!(Asset::from_uri_path("/.urspace/assets/session.js").is_some());
         assert!(Asset::from_uri_path("/sw.js").is_some());
         assert!(Asset::from_uri_path("/.urspace/wasm/urspace_browser_bg.wasm").is_some());
         assert!(Asset::from_uri_path("/.medousa/open/").is_some());

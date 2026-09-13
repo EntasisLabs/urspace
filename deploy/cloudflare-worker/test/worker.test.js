@@ -84,6 +84,7 @@ test("the public asset surface is an exact allowlist", () => {
   assert.deepEqual([...ASSETS.keys()], [
     "/.urspace/open/",
     "/.urspace/assets/main.js",
+    "/.urspace/assets/session.js",
     "/.urspace/assets/socket-shim.js",
     "/.urspace/assets/style.css",
     "/sw.js",
