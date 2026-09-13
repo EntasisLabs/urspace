@@ -18,6 +18,10 @@ use urspace_protocol::{
 };
 use uuid::Uuid;
 
+mod short_link;
+
+use short_link::{DEFAULT_SHORT_ORIGIN, ShortLinkPublisher};
+
 const DEFAULT_BOOTSTRAP_ORIGIN: &str = "https://urspace.online";
 const DEFAULT_TTL: &str = "1h";
 const DEFAULT_MAX_SESSIONS: u32 = 4;
@@ -58,6 +62,12 @@ enum Command {
         /// Explicit identity key path for development and recovery.
         #[arg(long, hide = true)]
         identity_file: Option<PathBuf>,
+        /// Publish an encrypted short link instead of printing the direct capability URL.
+        #[arg(long)]
+        short: bool,
+        /// Short-link service origin. Intended for compatible self-hosted deployments.
+        #[arg(long, default_value = DEFAULT_SHORT_ORIGIN, hide = true)]
+        short_origin: String,
     },
     /// Share a directory of static files.
     Static {
@@ -75,6 +85,10 @@ enum Command {
         name: Option<String>,
         #[arg(long, hide = true)]
         identity_file: Option<PathBuf>,
+        #[arg(long)]
+        short: bool,
+        #[arg(long, default_value = DEFAULT_SHORT_ORIGIN, hide = true)]
+        short_origin: String,
     },
     /// Fetch a path with the native protocol client.
     #[command(hide = true)]
@@ -83,6 +97,17 @@ enum Command {
         #[arg(default_value = "/")]
         path: String,
     },
+}
+
+struct ShareSettings {
+    bootstrap_origin: String,
+    ttl: Duration,
+    max_sessions: u32,
+    entry_path: String,
+    name: Option<String>,
+    identity_file: Option<PathBuf>,
+    short: bool,
+    short_origin: String,
 }
 
 #[tokio::main]
@@ -96,15 +121,21 @@ async fn main() -> Result<()> {
             entry_path,
             name,
             identity_file,
+            short,
+            short_origin,
         } => {
             proxy(
                 app,
-                bootstrap_origin,
-                ttl,
-                max_sessions,
-                entry_path,
-                name,
-                identity_file,
+                ShareSettings {
+                    bootstrap_origin,
+                    ttl,
+                    max_sessions,
+                    entry_path,
+                    name,
+                    identity_file,
+                    short,
+                    short_origin,
+                },
             )
             .await
         }
@@ -116,15 +147,21 @@ async fn main() -> Result<()> {
             entry_path,
             name,
             identity_file,
+            short,
+            short_origin,
         } => {
             serve_static(
                 root,
-                bootstrap_origin,
-                ttl,
-                max_sessions,
-                entry_path,
-                name,
-                identity_file,
+                ShareSettings {
+                    bootstrap_origin,
+                    ttl,
+                    max_sessions,
+                    entry_path,
+                    name,
+                    identity_file,
+                    short,
+                    short_origin,
+                },
             )
             .await
         }
@@ -132,55 +169,55 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn proxy(
-    upstream: String,
-    bootstrap_origin: String,
-    ttl: Duration,
-    max_sessions: u32,
-    entry_path: String,
-    name: Option<String>,
-    identity_file: Option<PathBuf>,
-) -> Result<()> {
+async fn proxy(upstream: String, settings: ShareSettings) -> Result<()> {
     let site = LoopbackSite::open(&upstream)?;
     ensure_app_is_listening(site.origin()).await?;
-    let identity_path = identity_path(identity_file, name.as_deref(), site.origin())?;
+    let identity_path = identity_path(
+        settings.identity_file,
+        settings.name.as_deref(),
+        site.origin(),
+    )?;
     serve_protocol(
         SiteProtocol::loopback,
         site,
         format!("app at {}", upstream.trim_end_matches('/')),
-        bootstrap_origin,
-        ttl,
-        max_sessions,
-        entry_path,
+        settings.bootstrap_origin,
+        settings.ttl,
+        settings.max_sessions,
+        settings.entry_path,
         identity_path,
+        settings
+            .short
+            .then(|| ShortLinkPublisher::new(&settings.short_origin))
+            .transpose()?,
     )
     .await
 }
 
-async fn serve_static(
-    root: PathBuf,
-    bootstrap_origin: String,
-    ttl: Duration,
-    max_sessions: u32,
-    entry_path: String,
-    name: Option<String>,
-    identity_file: Option<PathBuf>,
-) -> Result<()> {
+async fn serve_static(root: PathBuf, settings: ShareSettings) -> Result<()> {
     let canonical_root = tokio::fs::canonicalize(&root)
         .await
         .with_context(|| format!("resolve static directory {}", root.display()))?;
     let site = StaticSite::open(&canonical_root).await?;
     let source_key = canonical_root.to_string_lossy();
-    let identity_path = identity_path(identity_file, name.as_deref(), &source_key)?;
+    let identity_path = identity_path(
+        settings.identity_file,
+        settings.name.as_deref(),
+        &source_key,
+    )?;
     serve_protocol(
         SiteProtocol::new,
         site,
         format!("files from {}", canonical_root.display()),
-        bootstrap_origin,
-        ttl,
-        max_sessions,
-        entry_path,
+        settings.bootstrap_origin,
+        settings.ttl,
+        settings.max_sessions,
+        settings.entry_path,
         identity_path,
+        settings
+            .short
+            .then(|| ShortLinkPublisher::new(&settings.short_origin))
+            .transpose()?,
     )
     .await
 }
@@ -195,6 +232,7 @@ async fn serve_protocol<T>(
     max_sessions: u32,
     entry_path: String,
     identity_path: PathBuf,
+    short_links: Option<ShortLinkPublisher>,
 ) -> Result<()> {
     if max_sessions == 0 {
         bail!("max-sessions must be greater than zero");
@@ -208,7 +246,7 @@ async fn serve_protocol<T>(
         .context("bind Iroh endpoint")?;
     endpoint.online().await;
     let registry = CapabilityRegistry::default();
-    let (invite_id, url) = mint_invite(
+    let (invite_id, raw_url, expires_at_unix) = mint_invite(
         &endpoint,
         &identity,
         &registry,
@@ -217,17 +255,28 @@ async fn serve_protocol<T>(
         max_sessions,
         &entry_path,
     )?;
+    let share_url = publish_share_url(&raw_url, expires_at_unix, short_links.as_ref()).await;
+    let shortened = share_url != raw_url;
     let router = Router::builder(endpoint.clone())
         .accept(ALPN, make_protocol(registry.clone(), site))
         .spawn();
 
     println!("Urspace is serving {source_description}");
-    println!("Nothing was uploaded; application traffic travels over Iroh.\n");
-    println!("Share URL (treat it as a secret):\n{url}\n");
+    if shortened {
+        println!(
+            "Only an end-to-end encrypted link envelope was uploaded; application traffic travels over Iroh.\n"
+        );
+    } else {
+        println!("Nothing was uploaded; application traffic travels over Iroh.\n");
+    }
+    println!("Share URL (treat it as a secret):\n{share_url}\n");
+    if shortened {
+        println!("Run `raw` to print the direct capability URL.");
+    }
     println!("Accepts new browser sessions for: {}", format_duration(ttl));
     println!("Maximum admitted browser sessions: {max_sessions}");
     println!("Site identity: {}", identity.public().to_z32());
-    println!("Commands: invite | rotate | sessions | kick <session> | kick all | help");
+    println!("Commands: invite | rotate | raw | sessions | kick <session> | kick all | help");
     println!("Press Ctrl+C to stop sharing.\n");
 
     let console = operator_console(
@@ -238,7 +287,9 @@ async fn serve_protocol<T>(
         ttl_seconds,
         max_sessions,
         entry_path,
+        short_links,
         invite_id,
+        raw_url,
     );
     tokio::pin!(console);
     tokio::select! {
@@ -261,7 +312,7 @@ fn mint_invite(
     ttl_seconds: i64,
     max_sessions: u32,
     entry_path: &str,
-) -> Result<(Uuid, url::Url)> {
+) -> Result<(Uuid, url::Url, i64)> {
     let invite_id = Uuid::new_v4();
     let capability: [u8; 32] = rand::rng().random();
     let expires_at_unix = unix_now().saturating_add(ttl_seconds);
@@ -280,7 +331,24 @@ fn mint_invite(
     )?;
     let url = invite_url(&encoded)?;
     registry.insert(invite_id, &capability, expires_at_unix, max_sessions);
-    Ok((invite_id, url))
+    Ok((invite_id, url, expires_at_unix))
+}
+
+async fn publish_share_url(
+    raw_url: &url::Url,
+    expires_at_unix: i64,
+    short_links: Option<&ShortLinkPublisher>,
+) -> url::Url {
+    let Some(short_links) = short_links else {
+        return raw_url.clone();
+    };
+    match short_links.publish(raw_url, expires_at_unix).await {
+        Ok(short_url) => short_url,
+        Err(error) => {
+            eprintln!("Short-link publishing failed; using the direct URL: {error:#}");
+            raw_url.clone()
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -292,7 +360,9 @@ async fn operator_console(
     ttl_seconds: i64,
     max_sessions: u32,
     entry_path: String,
+    short_links: Option<ShortLinkPublisher>,
     mut current_invite_id: Uuid,
+    mut current_raw_url: url::Url,
 ) -> Result<()> {
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await? {
@@ -308,11 +378,18 @@ async fn operator_console(
                     ttl_seconds,
                     max_sessions,
                     &entry_path,
+                    short_links.as_ref(),
                     &mut current_invite_id,
-                )?;
+                    &mut current_raw_url,
+                )
+                .await?;
                 println!("New share URL (treat it as a secret):\n{url}");
+                if url != current_raw_url {
+                    println!("Run `raw` to print the direct capability URL.");
+                }
                 println!("Previously admitted sessions remain connected.");
             }
+            "raw" => println!("Direct capability URL (treat it as a secret):\n{current_raw_url}"),
             "sessions" => print_sessions(&registry),
             "kick all" => {
                 let count = registry.kick_all();
@@ -326,14 +403,18 @@ async fn operator_console(
                         ttl_seconds,
                         max_sessions,
                         &entry_path,
+                        short_links.as_ref(),
                         &mut current_invite_id,
-                    )?;
+                        &mut current_raw_url,
+                    )
+                    .await?;
                     println!("The old URL is closed to newcomers. Fresh share URL:\n{url}");
                 }
             }
             "help" => {
                 println!("invite          stop new admissions on the old URL and print a new one");
                 println!("rotate          alias for invite");
+                println!("raw             print the current direct capability URL");
                 println!("sessions        list admitted browser identities");
                 println!("kick <session>  disconnect and deny one browser identity");
                 println!("kick all        disconnect and deny every admitted browser identity");
@@ -348,8 +429,11 @@ async fn operator_console(
                         ttl_seconds,
                         max_sessions,
                         &entry_path,
+                        short_links.as_ref(),
                         &mut current_invite_id,
-                    )?;
+                        &mut current_raw_url,
+                    )
+                    .await?;
                     println!("The old URL is closed to newcomers. Fresh share URL:\n{url}");
                 }
             }
@@ -360,7 +444,7 @@ async fn operator_console(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn rotate_invite(
+async fn rotate_invite(
     endpoint: &Endpoint,
     identity: &SecretKey,
     registry: &CapabilityRegistry,
@@ -368,9 +452,11 @@ fn rotate_invite(
     ttl_seconds: i64,
     max_sessions: u32,
     entry_path: &str,
+    short_links: Option<&ShortLinkPublisher>,
     current_invite_id: &mut Uuid,
+    current_raw_url: &mut url::Url,
 ) -> Result<url::Url> {
-    let (next_invite_id, url) = mint_invite(
+    let (next_invite_id, raw_url, expires_at_unix) = mint_invite(
         endpoint,
         identity,
         registry,
@@ -379,9 +465,11 @@ fn rotate_invite(
         max_sessions,
         entry_path,
     )?;
+    let share_url = publish_share_url(&raw_url, expires_at_unix, short_links).await;
     registry.close_admissions(*current_invite_id);
     *current_invite_id = next_invite_id;
-    Ok(url)
+    *current_raw_url = raw_url;
+    Ok(share_url)
 }
 
 fn print_sessions(registry: &CapabilityRegistry) {
@@ -639,6 +727,8 @@ mod tests {
             bootstrap_origin,
             ttl,
             max_sessions,
+            short,
+            short_origin,
             ..
         } = cli.command
         else {
@@ -648,6 +738,17 @@ mod tests {
         assert_eq!(bootstrap_origin, DEFAULT_BOOTSTRAP_ORIGIN);
         assert_eq!(ttl, Duration::from_secs(3_600));
         assert_eq!(max_sessions, DEFAULT_MAX_SESSIONS);
+        assert!(!short);
+        assert_eq!(short_origin, DEFAULT_SHORT_ORIGIN);
+    }
+
+    #[test]
+    fn encrypted_short_links_require_explicit_operator_opt_in() {
+        let cli = Cli::try_parse_from(["urspace", "serve", "localhost:8787", "--short"]).unwrap();
+        let Command::Serve { short, .. } = cli.command else {
+            panic!("expected serve command");
+        };
+        assert!(short);
     }
 
     #[test]

@@ -51,10 +51,25 @@ port is opened, and pressing Ctrl+C stops new traffic immediately. The hour is
 an admission window: browsers already connected remain authorized after it
 closes, while new connections are rejected.
 
+For a compact share URL, explicitly opt into encrypted shortening:
+
+```bash
+urspace serve localhost:8787 --short
+```
+
+This prints a link shaped like `https://u.urspace.online/#s1=<secret>`. The CLI
+encrypts the complete signed invitation locally and uploads only the ciphertext.
+The secret remains in the URL fragment, is never included in the HTTP request,
+and decrypts the invitation in the recipient's browser. The short-link service
+can observe creation and retrieval metadata or deny service, but cannot read or
+forge the invitation. Shortening is limited to seven-day invitations and falls
+back to the direct URL if the optional service is unavailable.
+
 While sharing, the same terminal accepts live operator commands:
 
 - `invite` or `rotate` closes new admissions on the current link and prints a
   fresh one; already-admitted browsers keep their sessions.
+- `raw` prints the current direct capability URL when shortening is enabled.
 - `sessions` lists admitted browser identities and connection state.
 - `kick <session>` or `kick all` immediately disconnects selected identities,
   denies their automatic reconnects, closes the URL they know to newcomers, and
@@ -71,7 +86,7 @@ still creates a new random capability, invite ID, expiry, and session budget.
 Identity keys are stored in the platform-local application data directory under
 `urspace/sites` with private file permissions.
 
-See [docs/cli.md](docs/cli.md) for the complete preview command contract.
+See [docs/cli.md](docs/cli.md) for the complete command contract.
 
 ## What works
 
@@ -82,6 +97,7 @@ See [docs/cli.md](docs/cli.md) for the complete preview command contract.
 - Vite/React bundles, client-side routes, and page-defined WebMCP tools
 - Automatic Iroh reconnection for already-admitted browser sessions
 - Expiring, revocable, session-limited invites
+- Optional end-to-end encrypted short links with direct-link fallback
 
 The loopback proxy is intentionally limited to `http://127.0.0.1`,
 `http://[::1]`, or `http://localhost`. It will not proxy to LAN or Internet
@@ -125,6 +141,9 @@ cargo run -p urspace-host --bin urspace -- serve localhost:8787 \
   --ttl 1h \
   --max-sessions 4
 ```
+
+Remove the local bootstrap override and add `--short` when sharing StreetClanker
+through the production `urspace.online` edge.
 
 Open the emitted URL in a browser. The capability fragment is removed before
 BoxClub code runs. Its frontend chunks, `/api/*` requests, `/ws` connection, and
