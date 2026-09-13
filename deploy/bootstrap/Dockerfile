@@ -16,6 +16,7 @@ FROM debian:bookworm-slim
 WORKDIR /srv
 COPY --from=builder /src/target/release/urspace-bootstrap /usr/local/bin/urspace-bootstrap
 COPY --from=builder /src/apps/bootstrap/public /srv/apps/bootstrap/public
+COPY --from=builder /src/LICENSE /src/LICENSE-MIT /src/LICENSE-APACHE /usr/share/licenses/urspace/
 
 USER 65532:65532
 EXPOSE 8080

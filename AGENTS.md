@@ -8,4 +8,5 @@
 - New protocol fields require versioning and tamper/expiry tests.
 - Resolve filesystem paths canonically and reject any target outside the shared
   root.
-- Keep this repository private unless its owner explicitly changes that policy.
+- Treat this repository as public. Never add private infrastructure identifiers,
+  personal filesystem paths, credentials, or bearer invitations.

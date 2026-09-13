@@ -10,20 +10,30 @@ that decides where and how the browser connects.
 
 ## Install and share
 
-Private-preview releases are published for Apple Silicon and Intel macOS,
-Arm64 and x86-64 Linux, and x86-64 Windows. Collaborators authenticated with
-GitHub CLI can install the latest macOS or Linux build without a Rust toolchain:
+Prebuilt releases are published for Apple Silicon and Intel macOS, Arm64 and
+x86-64 Linux, and x86-64 Windows. macOS and Linux users can install the latest
+release without a Rust toolchain:
 
 ```bash
-./scripts/install-release.sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/EntasisLabs/urspace/releases/latest/download/install-urspace.sh \
+  | bash
 ```
 
 Set `URSPACE_INSTALL_DIR` to choose a destination other than `~/.local/bin`, or
-pass a tag such as `v0.1.0` to install an exact release. The installer downloads
-through GitHub CLI and verifies the selected archive against the release's
-`SHA256SUMS` before installing it.
+download the script and pass a tag such as `v0.2.1` to install an exact release.
+The installer uses public GitHub release URLs and verifies the selected archive
+against the release's `SHA256SUMS` before installing it. Windows users can
+download `urspace-*-x86_64-pc-windows-msvc.zip` from
+[GitHub Releases](https://github.com/EntasisLabs/urspace/releases).
+Every release archive contains the license texts and has GitHub build-provenance
+attestations. A downloaded archive can be independently checked with:
 
-To build the current private preview from source instead:
+```bash
+gh attestation verify <archive> --repo EntasisLabs/urspace
+```
+
+To build from source instead:
 
 ```bash
 cargo install --locked --path crates/urspace-host
@@ -86,13 +96,13 @@ For the local end-to-end setup, one command builds and runs BoxClub, the browser
 bootstrap, and the Iroh proxy until Ctrl+C:
 
 ```bash
-./scripts/dev-boxclub.sh /Users/theelevators/boxclub/BoxClub
+./scripts/dev-boxclub.sh /path/to/boxclub
 ```
 
 The equivalent three-terminal setup is useful when debugging:
 
 ```bash
-cd /Users/theelevators/boxclub/BoxClub
+cd /path/to/boxclub
 npm run build
 NODE_ENV=production PORT=8787 npm start
 ```
@@ -155,3 +165,15 @@ the original invite to reconnect.
 See [SECURITY.md](SECURITY.md) before exposing a non-development bootstrap.
 The production container, wildcard DNS/TLS contract, verification steps, and
 operational rules are in [docs/bootstrap-deployment.md](docs/bootstrap-deployment.md).
+
+## Contributing
+
+Bug reports and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md)
+for the security boundaries and local checks. Report suspected vulnerabilities
+privately as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+Urspace is available under either the
+[Apache License 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your
+option. Contributions are accepted under the same terms.

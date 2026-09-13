@@ -5,8 +5,8 @@ repo="${URSPACE_GITHUB_REPOSITORY:-EntasisLabs/urspace}"
 version="${1:-latest}"
 install_dir="${URSPACE_INSTALL_DIR:-${HOME}/.local/bin}"
 
-if ! command -v gh >/dev/null 2>&1; then
-  echo "GitHub CLI is required for private-preview downloads: https://cli.github.com" >&2
+if ! command -v curl >/dev/null 2>&1; then
+  echo "curl is required to download Urspace releases." >&2
   exit 1
 fi
 
@@ -28,26 +28,25 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ "${version}" == "latest" ]]; then
-  gh release download \
-    --repo "${repo}" \
-    --pattern "urspace-*-${target}.tar.gz" \
-    --pattern SHA256SUMS \
-    --dir "${download_dir}"
-else
-  gh release download "${version}" \
-    --repo "${repo}" \
-    --pattern "urspace-${version}-${target}.tar.gz" \
-    --pattern SHA256SUMS \
-    --dir "${download_dir}"
+  latest_url="$(curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+    --output /dev/null --write-out '%{url_effective}' \
+    "https://github.com/${repo}/releases/latest")"
+  version="${latest_url##*/}"
 fi
 
-archive="$(find "${download_dir}" -maxdepth 1 -name "urspace-*-${target}.tar.gz" -print -quit)"
-if [[ -z "${archive}" ]]; then
-  echo "The selected release does not contain a binary for ${target}." >&2
-  exit 1
+if [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+  echo "Release version must be a tag such as v0.2.1." >&2
+  exit 2
 fi
 
-archive_name="$(basename "${archive}")"
+archive_name="urspace-${version}-${target}.tar.gz"
+archive="${download_dir}/${archive_name}"
+release_url="https://github.com/${repo}/releases/download/${version}"
+curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 3 \
+  --output "${archive}" "${release_url}/${archive_name}"
+curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 3 \
+  --output "${download_dir}/SHA256SUMS" "${release_url}/SHA256SUMS"
+
 expected="$(awk -v name="${archive_name}" '$2 == name { print $1 }' "${download_dir}/SHA256SUMS")"
 if [[ -z "${expected}" ]]; then
   echo "SHA256SUMS does not contain ${archive_name}." >&2

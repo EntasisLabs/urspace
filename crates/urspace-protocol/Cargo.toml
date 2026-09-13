@@ -3,6 +3,8 @@ name = "urspace-protocol"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 base64.workspace = true

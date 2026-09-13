@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -gt 1 ]]; then
-  echo "usage: $0 [boxclub-directory]" >&2
+if [[ $# -ne 1 ]]; then
+  echo "usage: $0 <boxclub-directory>" >&2
   exit 2
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
-boxclub_dir="${1:-/Users/theelevators/boxclub/BoxClub}"
+boxclub_dir="$1"
 boxclub_port="${BOXCLUB_PORT:-8787}"
 bootstrap_port="${URSPACE_BOOTSTRAP_PORT:-8080}"
 

@@ -3,6 +3,16 @@
 Protocol knowledge is assumed public. An attacker may know every field, state
 transition, endpoint, and implementation detail described here.
 
+## Reporting a vulnerability
+
+Do not open a public issue for a suspected vulnerability or include invitation
+URLs, capabilities, private keys, or deployment credentials in a report. Use
+[GitHub private vulnerability reporting](https://github.com/EntasisLabs/urspace/security/advisories/new)
+so the maintainers can investigate before public disclosure.
+
+Security fixes are provided for the latest release. Older preview releases may
+be used to confirm regressions but should not be assumed to receive patches.
+
 ## Protected assets
 
 - Site endpoint private key
