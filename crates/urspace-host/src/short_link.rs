@@ -156,6 +156,8 @@ mod tests {
     #[test]
     fn sealing_has_a_stable_cross_language_vector() {
         let seed = [7_u8; 32];
+        // Fixed public test data is required for this cross-language known-answer vector.
+        // codeql[rust/hard-coded-cryptographic-value]
         let nonce = [9_u8; 12];
         let (lookup, envelope) = seal_invite(
             "https://3mied18mppzo5rm16uzw5s6rxakceay3snhimxph3yjqi5tkdy8o.urspace.online/.urspace/open/#u3=fixture",
