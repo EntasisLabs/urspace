@@ -191,6 +191,18 @@ pub fn invite_url(encoded: &str) -> Result<Url, InviteError> {
 }
 
 pub fn verify_invite_url(raw: &str, now_unix: i64) -> Result<InvitePayload, InviteError> {
+    verify_invite_url_inner(raw, Some(now_unix))
+}
+
+/// Verifies a previously admitted invitation without enforcing its admission expiry.
+///
+/// The host remains the authorization boundary: it accepts this invitation only when the
+/// connecting endpoint identity was admitted before expiry and has not been kicked or revoked.
+pub fn verify_invite_url_for_resume(raw: &str) -> Result<InvitePayload, InviteError> {
+    verify_invite_url_inner(raw, None)
+}
+
+fn verify_invite_url_inner(raw: &str, now_unix: Option<i64>) -> Result<InvitePayload, InviteError> {
     let url = Url::parse(raw).map_err(|_| InviteError::InvalidBootstrapUrl)?;
     let fragment = url.fragment().ok_or(InviteError::MissingFragment)?;
     let (fragment_version, encoded) = if let Some(encoded) = fragment.strip_prefix("u3=") {
@@ -220,7 +232,7 @@ pub fn verify_invite_url(raw: &str, now_unix: i64) -> Result<InvitePayload, Invi
 
 pub fn verify_encoded_invite(encoded: &str, now_unix: i64) -> Result<InvitePayload, InviteError> {
     let signed = decode_signed(encoded)?;
-    verify_signed(&signed, now_unix)?;
+    verify_signed(&signed, Some(now_unix))?;
     Ok(signed.payload)
 }
 
@@ -231,7 +243,7 @@ fn decode_signed(encoded: &str) -> Result<SignedInvite, InviteError> {
     postcard::from_bytes(&bytes).map_err(|_| InviteError::InvalidEncoding)
 }
 
-fn verify_signed(signed: &SignedInvite, now_unix: i64) -> Result<(), InviteError> {
+fn verify_signed(signed: &SignedInvite, now_unix: Option<i64>) -> Result<(), InviteError> {
     wire_profile(signed.payload.version)?;
     validate_entry_path(&signed.payload.entry_path)?;
     if normalize_bootstrap_origin(&signed.payload.bootstrap_origin)?
@@ -239,7 +251,7 @@ fn verify_signed(signed: &SignedInvite, now_unix: i64) -> Result<(), InviteError
     {
         return Err(InviteError::InvalidBootstrapUrl);
     }
-    if signed.payload.expires_at_unix <= now_unix {
+    if now_unix.is_some_and(|now| signed.payload.expires_at_unix <= now) {
         return Err(InviteError::Expired);
     }
 
@@ -413,6 +425,12 @@ mod tests {
             verify_encoded_invite(&encoded, 2_000),
             Err(InviteError::Expired)
         ));
+        assert_eq!(
+            verify_invite_url_for_resume(invite_url(&encoded).unwrap().as_str())
+                .unwrap()
+                .expires_at_unix,
+            2_000
+        );
     }
 
     #[test]

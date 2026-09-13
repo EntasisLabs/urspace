@@ -50,13 +50,14 @@ mints a fresh random capability even when the site identity is reused.
 
 Expiration and the session budget are admission controls: they reject new
 browser connections but do not terminate a connection that was already
-authorized. An admitted browser remains connected until it closes the session,
-the host revokes it, the host stops sharing, or the underlying transport is
-lost. If that transport drops while the in-memory Urspace browser session is
-still alive, Urspace reconnects it with the same ephemeral Iroh identity—even
-after the admission window closes. Resumption remains bound to both that
-authenticated endpoint identity and the capability; neither is persisted to
-browser storage.
+authorized. An admitted browser remains authorized until the host kicks or
+revokes it, the host stops sharing, or the browser loses every in-memory copy of
+the session. Transport drops and idle service-worker eviction reconnect with the
+same ephemeral Iroh identity—even after the admission window closes or the link
+rotates—while at least one controlled Urspace page remains alive. Resumption is
+bound to both that authenticated endpoint identity and the capability; neither
+is written to browser storage. A full page discard or browser restart therefore
+requires reopening the invitation.
 
 The foreground sharing console provides live controls without restarting the
 site:

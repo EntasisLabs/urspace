@@ -8,6 +8,7 @@ const MAX_SHORT_LINK_TTL_SECONDS = 7 * 24 * 60 * 60;
 const ASSETS = new Map([
   ["/.urspace/open/", ["/.urspace/open/index.html", "text/html; charset=utf-8"]],
   ["/.urspace/assets/main.js", ["/.urspace/assets/main.js", "text/javascript; charset=utf-8"]],
+  ["/.urspace/assets/session.js", ["/.urspace/assets/session.js", "text/javascript; charset=utf-8"]],
   ["/.urspace/assets/socket-shim.js", ["/.urspace/assets/socket-shim.js", "text/javascript; charset=utf-8"]],
   ["/.urspace/assets/style.css", ["/.urspace/assets/style.css", "text/css; charset=utf-8"]],
   ["/sw.js", ["/sw.js", "text/javascript; charset=utf-8"]],

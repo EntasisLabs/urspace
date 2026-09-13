@@ -1,10 +1,21 @@
 import init, { SiteClient } from "/.urspace/wasm/urspace_browser.js";
+import {
+  authorizeResumeBootstrap,
+  createResumeNonce,
+  createResumePayload,
+  injectResumeShim,
+  injectSocketShim,
+  parseResumePayload,
+} from "/.urspace/assets/session.js";
 
-const BOOTSTRAP_REVISION = "v6-urspace-control-1";
+const BOOTSTRAP_REVISION = "v7-sticky-browser-session-1";
 const RESERVED_PREFIXES = ["/.urspace/", "/.medousa/"];
 const MAX_BROWSER_REQUEST_BYTES = 16 * 1024 * 1024;
+const RESUME_REQUEST_TIMEOUT_MS = 8000;
 let client = null;
 let wasmReady = null;
+let resumePayload = "";
+let recovery = null;
 
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
@@ -25,9 +36,17 @@ async function arm(message, port) {
     await wasmReady;
     port.postMessage({ type: "progress", stage: "connecting-relay" });
     const connected = await SiteClient.connect(invitationUrl, Number(message.nowUnix));
+    const endpointSecret = connected.exportResumeKey();
+    let nextResumePayload;
+    try {
+      nextResumePayload = createResumePayload(invitationUrl, endpointSecret);
+    } finally {
+      endpointSecret.fill(0);
+    }
     invitationUrl = "";
     client?.close();
     client = connected;
+    resumePayload = nextResumePayload;
     port.postMessage({
       ok: true,
       entryPath: connected.entryPath,
@@ -42,6 +61,50 @@ async function arm(message, port) {
   }
 }
 
+async function ensureClient() {
+  if (client) return client;
+  recovery ||= recoverClient().finally(() => {
+    recovery = null;
+  });
+  return recovery;
+}
+
+async function recoverClient() {
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: false });
+  if (windows.length === 0) throw new Error("No live browser page can resume this session.");
+  const payload = await Promise.any(windows.map(requestResumePayload));
+  const session = parseResumePayload(payload, self.location.origin);
+  try {
+    wasmReady ||= init();
+    await wasmReady;
+    const connected = await SiteClient.resume(session.invitationUrl, session.endpointSecret);
+    client?.close();
+    client = connected;
+    resumePayload = payload;
+    return connected;
+  } finally {
+    session.invitationUrl = "";
+    session.endpointSecret.fill(0);
+  }
+}
+
+function requestResumePayload(windowClient) {
+  return new Promise((resolve, reject) => {
+    const channel = new MessageChannel();
+    const timeout = setTimeout(() => {
+      channel.port1.close();
+      reject(new Error("A live browser page did not answer the resume request."));
+    }, RESUME_REQUEST_TIMEOUT_MS);
+    channel.port1.onmessage = ({ data }) => {
+      if (data?.type !== "urspace-resume" || typeof data.payload !== "string") return;
+      clearTimeout(timeout);
+      channel.port1.close();
+      resolve(data.payload);
+    };
+    windowClient.postMessage({ type: "urspace-resume-request" }, [channel.port2]);
+  });
+}
+
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin || url.pathname === "/sw.js" || RESERVED_PREFIXES.some((prefix) => url.pathname.startsWith(prefix))) {
@@ -51,7 +114,12 @@ self.addEventListener("fetch", (event) => {
 });
 
 async function meshFetch(request) {
-  if (!client) return disconnectedResponse();
+  let activeClient;
+  try {
+    activeClient = await ensureClient();
+  } catch {
+    return disconnectedResponse();
+  }
   try {
     let body = new Uint8Array();
     if (!["GET", "HEAD"].includes(request.method)) {
@@ -64,7 +132,7 @@ async function meshFetch(request) {
     const headers = [];
     request.headers.forEach((value, name) => headers.push({ name, value }));
     const url = new URL(request.url);
-    const fetchFromMesh = () => client.fetch(
+    const fetchFromMesh = () => activeClient.fetch(
       request.method,
       `${url.pathname}${url.search}`,
       headers,
@@ -91,10 +159,20 @@ async function meshFetch(request) {
     let bytes = new Uint8Array(response.body);
     if (response.status === 200 && response.content_type?.toLowerCase().startsWith("text/html")) {
       const html = new TextDecoder().decode(bytes);
-      const shim = '<script src="/.urspace/assets/socket-shim.js"></script>';
-      const injected = /<head(?:\s[^>]*)?>/i.test(html)
-        ? html.replace(/<head(?:\s[^>]*)?>/i, (head) => `${head}${shim}`)
-        : `${shim}${html}`;
+      let injected = injectSocketShim(html);
+      if (request.mode === "navigate" && resumePayload) {
+        const nonce = createResumeNonce();
+        const authorization = authorizeResumeBootstrap(
+          responseHeaders.get("content-security-policy"),
+          nonce,
+        );
+        if (authorization.allowed) {
+          if (authorization.policy) {
+            responseHeaders.set("content-security-policy", authorization.policy);
+          }
+          injected = injectResumeShim(html, resumePayload, nonce);
+        }
+      }
       bytes = new TextEncoder().encode(injected);
     }
     const nullBody = request.method === "HEAD" || [101, 204, 205, 304].includes(response.status);
@@ -113,7 +191,7 @@ async function meshFetch(request) {
 function disconnectedResponse() {
   const html = `<!doctype html><meta charset="utf-8"><title>Reconnect private site</title>
     <style>body{font:16px system-ui;max-width:40rem;margin:15vh auto;padding:2rem;background:#090b0c;color:#e7ece8}a{color:#79e2a7}</style>
-    <h1>Private connection closed</h1><p>Reopen the original invitation URL to reconnect. The capability was not saved to browser storage.</p>`;
+    <h1>Private connection closed</h1><p>No live Urspace page could resume this browser session. Reopen the invitation to reconnect.</p>`;
   return new Response(html, {
     status: 503,
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
@@ -121,13 +199,16 @@ function disconnectedResponse() {
 }
 
 async function openSocket(path, port) {
-  if (!client) {
+  let activeClient;
+  try {
+    activeClient = await ensureClient();
+  } catch {
     port.postMessage({ type: "error" });
     port.postMessage({ type: "close", code: 1006, reason: "Private connection closed", clean: false });
     return;
   }
   try {
-    const socket = await client.openSocket(String(path || "/ws"));
+    const socket = await activeClient.openSocket(String(path || "/ws"));
     port.postMessage({ type: "open" });
     port.onmessage = async ({ data }) => {
       try {

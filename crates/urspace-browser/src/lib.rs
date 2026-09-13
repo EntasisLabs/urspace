@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use urspace_protocol::{
     ClientHello, Header, RequestMethod, ServerHello, SiteRequest, SiteResponseHead, SocketMessage,
-    alpn_for_invite, read_frame, verify_invite_url, write_frame,
+    alpn_for_invite, read_frame, verify_invite_url, verify_invite_url_for_resume, write_frame,
 };
 use uuid::Uuid;
 use wasm_bindgen::{JsError, JsValue, prelude::wasm_bindgen};
@@ -58,56 +58,31 @@ impl SiteClient {
             return Err(JsError::new("browser clock is outside the supported range"));
         }
         let now_unix = now_unix.floor() as i64;
-        let mut invite = match verify_invite_url(&invitation_url, now_unix) {
-            Ok(invite) => invite,
-            Err(error) => {
+        Self::establish(invitation_url, Some(now_unix), iroh::SecretKey::generate()).await
+    }
+
+    #[wasm_bindgen(js_name = resume)]
+    pub async fn resume(
+        mut invitation_url: String,
+        mut endpoint_secret: Vec<u8>,
+    ) -> Result<Self, JsError> {
+        let key_bytes: [u8; 32] = match endpoint_secret.as_slice().try_into() {
+            Ok(bytes) => bytes,
+            Err(_) => {
                 invitation_url.zeroize();
-                return Err(JsError::new(&format!("invitation rejected: {error}")));
+                endpoint_secret.zeroize();
+                return Err(JsError::new("browser resume identity is invalid"));
             }
         };
-        invitation_url.zeroize();
+        endpoint_secret.zeroize();
+        let key_bytes = Zeroizing::new(key_bytes);
+        let endpoint_secret = iroh::SecretKey::from_bytes(&key_bytes);
+        Self::establish(invitation_url, None, endpoint_secret).await
+    }
 
-        let capability = Zeroizing::new(std::mem::take(&mut invite.capability));
-        let ticket = EndpointTicket::from_str(&invite.endpoint_ticket)
-            .map_err(|error| JsError::new(&format!("invalid endpoint ticket: {error}")))?;
-        let endpoint_addr = normalize_relay_hosts(ticket.endpoint_addr())
-            .map_err(|error| JsError::new(&format!("invalid relay address: {error}")))?;
-        let relay_urls: Vec<_> = endpoint_addr.relay_urls().cloned().collect();
-        if relay_urls.is_empty() {
-            return Err(JsError::new("invitation does not contain a browser relay"));
-        }
-        let endpoint = Endpoint::builder(presets::N0)
-            .relay_mode(RelayMode::custom(relay_urls))
-            .bind()
-            .await
-            .map_err(|error| JsError::new(&format!("could not start Iroh: {error}")))?;
-        let connection = match connect_and_authorize(
-            &endpoint,
-            &endpoint_addr,
-            invite.version,
-            invite.invite_id,
-            &capability,
-        )
-        .await
-        {
-            Ok(connection) => connection,
-            Err(error) => {
-                endpoint.close().await;
-                return Err(error);
-            }
-        };
-
-        Ok(Self {
-            endpoint,
-            endpoint_addr,
-            connection: Mutex::new(connection),
-            invite_id: invite.invite_id,
-            invite_version: invite.version,
-            capability,
-            closed: AtomicBool::new(false),
-            entry_path: invite.entry_path,
-            site_id: invite.site_id,
-        })
+    #[wasm_bindgen(js_name = exportResumeKey)]
+    pub fn export_resume_key(&self) -> Vec<u8> {
+        self.endpoint.secret_key().to_bytes().to_vec()
     }
 
     #[wasm_bindgen(getter, js_name = entryPath)]
@@ -207,6 +182,68 @@ impl SiteClient {
 }
 
 impl SiteClient {
+    async fn establish(
+        mut invitation_url: String,
+        now_unix: Option<i64>,
+        endpoint_secret: iroh::SecretKey,
+    ) -> Result<Self, JsError> {
+        let verified = match now_unix {
+            Some(now_unix) => verify_invite_url(&invitation_url, now_unix),
+            None => verify_invite_url_for_resume(&invitation_url),
+        };
+        let mut invite = match verified {
+            Ok(invite) => invite,
+            Err(error) => {
+                invitation_url.zeroize();
+                return Err(JsError::new(&format!("invitation rejected: {error}")));
+            }
+        };
+        invitation_url.zeroize();
+
+        let capability = Zeroizing::new(std::mem::take(&mut invite.capability));
+        let ticket = EndpointTicket::from_str(&invite.endpoint_ticket)
+            .map_err(|error| JsError::new(&format!("invalid endpoint ticket: {error}")))?;
+        let endpoint_addr = normalize_relay_hosts(ticket.endpoint_addr())
+            .map_err(|error| JsError::new(&format!("invalid relay address: {error}")))?;
+        let relay_urls: Vec<_> = endpoint_addr.relay_urls().cloned().collect();
+        if relay_urls.is_empty() {
+            return Err(JsError::new("invitation does not contain a browser relay"));
+        }
+        let endpoint = Endpoint::builder(presets::N0)
+            .secret_key(endpoint_secret)
+            .relay_mode(RelayMode::custom(relay_urls))
+            .bind()
+            .await
+            .map_err(|error| JsError::new(&format!("could not start Iroh: {error}")))?;
+        let connection = match connect_and_authorize(
+            &endpoint,
+            &endpoint_addr,
+            invite.version,
+            invite.invite_id,
+            &capability,
+        )
+        .await
+        {
+            Ok(connection) => connection,
+            Err(error) => {
+                endpoint.close().await;
+                return Err(error);
+            }
+        };
+
+        Ok(Self {
+            endpoint,
+            endpoint_addr,
+            connection: Mutex::new(connection),
+            invite_id: invite.invite_id,
+            invite_version: invite.version,
+            capability,
+            closed: AtomicBool::new(false),
+            entry_path: invite.entry_path,
+            site_id: invite.site_id,
+        })
+    }
+
     async fn open_stream(
         &self,
         kind: &str,
