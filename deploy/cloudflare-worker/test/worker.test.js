@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   ASSETS,
+  LEGACY_V2_ASSETS,
   handleRequest,
   isCanonicalSiteHost,
   isCanonicalZ32KeyLabel,
@@ -42,13 +43,13 @@ test("accepts only canonical 32-byte z-base-32 site hosts", () => {
 
 test("the public asset surface is an exact allowlist", () => {
   assert.deepEqual([...ASSETS.keys()], [
-    "/.medousa/open/",
-    "/.medousa/assets/main.js",
-    "/.medousa/assets/socket-shim.js",
-    "/.medousa/assets/style.css",
+    "/.urspace/open/",
+    "/.urspace/assets/main.js",
+    "/.urspace/assets/socket-shim.js",
+    "/.urspace/assets/style.css",
     "/sw.js",
-    "/.medousa/wasm/medousa_site_browser.js",
-    "/.medousa/wasm/medousa_site_browser_bg.wasm",
+    "/.urspace/wasm/urspace_browser.js",
+    "/.urspace/wasm/urspace_browser_bg.wasm",
   ]);
 });
 
@@ -70,13 +71,25 @@ test("serves an allowlisted asset with hardened headers", async () => {
 test("maps the public open path to its private index asset", async () => {
   const { env, requests } = fixture();
   const result = await handleRequest(
-    new Request(`https://${SITE_HOST}/.medousa/open/?invite=secret#ignored`),
+    new Request(`https://${SITE_HOST}/.urspace/open/?invite=secret#ignored`),
     env,
   );
 
   assert.equal(result.status, 200);
-  assert.equal(new URL(requests[0].url).pathname, "/.medousa/open/index.html");
+  assert.equal(new URL(requests[0].url).pathname, "/.urspace/open/index.html");
   assert.equal(new URL(requests[0].url).search, "");
+});
+
+test("maps legacy v2 paths to current Urspace assets", async () => {
+  assert.equal(LEGACY_V2_ASSETS.has("/.medousa/open/"), true);
+  const { env, requests } = fixture();
+  const result = await handleRequest(
+    new Request(`https://${SITE_HOST}/.medousa/open/#m2=redacted`),
+    env,
+  );
+
+  assert.equal(result.status, 200);
+  assert.equal(new URL(requests[0].url).pathname, "/.urspace/open/index.html");
 });
 
 test("rejects invalid hosts, methods, and paths before touching assets", async () => {

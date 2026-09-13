@@ -20,10 +20,10 @@ if ! command -v wasm-bindgen >/dev/null 2>&1; then
 fi
 
 env CC_wasm32_unknown_unknown="${wasm_cc}" \
-  cargo build -p medousa-site-browser --target wasm32-unknown-unknown --release
+  cargo build -p urspace-browser --target wasm32-unknown-unknown --release
 
 wasm-bindgen \
-  target/wasm32-unknown-unknown/release/medousa_site_browser.wasm \
-  --out-dir apps/bootstrap/public/.medousa/wasm \
+  target/wasm32-unknown-unknown/release/urspace_browser.wasm \
+  --out-dir apps/bootstrap/public/.urspace/wasm \
   --target web \
   --weak-refs

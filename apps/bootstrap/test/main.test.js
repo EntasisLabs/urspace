@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { explainConnectionError, isSafari } from "../public/.medousa/assets/main.js";
+import { explainConnectionError, isSafari } from "../public/.urspace/assets/main.js";
 
 const SAFARI = "Mozilla/5.0 AppleWebKit/605.1.15 Version/26.0 Safari/605.1.15";
 const CHROME = "Mozilla/5.0 AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36";

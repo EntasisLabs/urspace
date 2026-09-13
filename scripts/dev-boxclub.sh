@@ -10,7 +10,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 boxclub_dir="${1:-/Users/theelevators/boxclub/BoxClub}"
 boxclub_port="${BOXCLUB_PORT:-8787}"
-bootstrap_port="${MEDOUSA_SITES_BOOTSTRAP_PORT:-8080}"
+bootstrap_port="${URSPACE_BOOTSTRAP_PORT:-8080}"
 
 if [[ ! -f "${boxclub_dir}/package.json" ]]; then
   echo "BoxClub package.json not found under ${boxclub_dir}" >&2
@@ -50,7 +50,7 @@ curl --fail --silent "http://127.0.0.1:${boxclub_port}/api/health" >/dev/null
 
 echo "Minting a 1-hour BoxClub invite. Press Ctrl+C to stop all three processes."
 cd "${repo_root}"
-cargo run -p medousa-site-host --bin urspace -- serve "localhost:${boxclub_port}" \
+cargo run -p urspace-host --bin urspace -- serve "localhost:${boxclub_port}" \
   --bootstrap-origin "http://localhost:${bootstrap_port}" \
   --name boxclub \
   --ttl 1h \

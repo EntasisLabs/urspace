@@ -8,12 +8,12 @@ use std::{
 
 use iroh::{Endpoint, EndpointAddr, RelayMode, RelayUrl, TransportAddr, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
-use medousa_site_protocol::{
-    ALPN, ClientHello, Header, INVITE_VERSION, RequestMethod, ServerHello, SiteRequest,
-    SiteResponseHead, SocketMessage, read_frame, verify_invite_url, write_frame,
-};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use urspace_protocol::{
+    ClientHello, Header, RequestMethod, ServerHello, SiteRequest, SiteResponseHead, SocketMessage,
+    alpn_for_invite, read_frame, verify_invite_url, write_frame,
+};
 use uuid::Uuid;
 use wasm_bindgen::{JsError, JsValue, prelude::wasm_bindgen};
 use zeroize::{Zeroize, Zeroizing};
@@ -42,6 +42,7 @@ pub struct SiteClient {
     endpoint_addr: EndpointAddr,
     connection: Mutex<iroh::endpoint::Connection>,
     invite_id: Uuid,
+    invite_version: u8,
     capability: Zeroizing<[u8; 32]>,
     closed: AtomicBool,
     entry_path: String,
@@ -80,22 +81,28 @@ impl SiteClient {
             .bind()
             .await
             .map_err(|error| JsError::new(&format!("could not start Iroh: {error}")))?;
-        let connection =
-            match connect_and_authorize(&endpoint, &endpoint_addr, invite.invite_id, &capability)
-                .await
-            {
-                Ok(connection) => connection,
-                Err(error) => {
-                    endpoint.close().await;
-                    return Err(error);
-                }
-            };
+        let connection = match connect_and_authorize(
+            &endpoint,
+            &endpoint_addr,
+            invite.version,
+            invite.invite_id,
+            &capability,
+        )
+        .await
+        {
+            Ok(connection) => connection,
+            Err(error) => {
+                endpoint.close().await;
+                return Err(error);
+            }
+        };
 
         Ok(Self {
             endpoint,
             endpoint_addr,
             connection: Mutex::new(connection),
             invite_id: invite.invite_id,
+            invite_version: invite.version,
             capability,
             closed: AtomicBool::new(false),
             entry_path: invite.entry_path,
@@ -221,6 +228,7 @@ impl SiteClient {
         let replacement = connect_and_authorize(
             &self.endpoint,
             &self.endpoint_addr,
+            self.invite_version,
             self.invite_id,
             &self.capability,
         )
@@ -240,12 +248,15 @@ impl SiteClient {
 async fn connect_and_authorize(
     endpoint: &Endpoint,
     endpoint_addr: &EndpointAddr,
+    invite_version: u8,
     invite_id: Uuid,
     capability: &[u8; 32],
 ) -> Result<iroh::endpoint::Connection, JsError> {
+    let alpn = alpn_for_invite(invite_version)
+        .map_err(|error| JsError::new(&format!("unsupported invitation: {error}")))?;
     let connection = match n0_future::time::timeout(
         SITE_CONNECT_TIMEOUT,
-        endpoint.connect(endpoint_addr.clone(), ALPN),
+        endpoint.connect(endpoint_addr.clone(), alpn),
     )
     .await
     {
@@ -266,7 +277,7 @@ async fn connect_and_authorize(
         write_frame(
             &mut send,
             &ClientHello {
-                version: INVITE_VERSION,
+                version: invite_version,
                 invite_id,
                 capability: *capability,
             },

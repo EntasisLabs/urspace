@@ -22,8 +22,8 @@ const CROSS_ORIGIN_RESOURCE_POLICY: HeaderName =
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "medousa-site-bootstrap",
-    about = "Hardened wildcard bootstrap server for Medousa Sites"
+    name = "urspace-bootstrap",
+    about = "Hardened wildcard bootstrap server for Urspace"
 )]
 struct Cli {
     #[arg(long)]
@@ -99,26 +99,32 @@ impl Asset {
 
     fn from_uri_path(path: &str) -> Option<Self> {
         match path {
-            "/.medousa/open/" => Some(Self::Open),
-            "/.medousa/assets/main.js" => Some(Self::Main),
-            "/.medousa/assets/socket-shim.js" => Some(Self::SocketShim),
-            "/.medousa/assets/style.css" => Some(Self::Style),
+            "/.urspace/open/" | "/.medousa/open/" => Some(Self::Open),
+            "/.urspace/assets/main.js" | "/.medousa/assets/main.js" => Some(Self::Main),
+            "/.urspace/assets/socket-shim.js" | "/.medousa/assets/socket-shim.js" => {
+                Some(Self::SocketShim)
+            }
+            "/.urspace/assets/style.css" | "/.medousa/assets/style.css" => Some(Self::Style),
             "/sw.js" => Some(Self::ServiceWorker),
-            "/.medousa/wasm/medousa_site_browser.js" => Some(Self::WasmGlue),
-            "/.medousa/wasm/medousa_site_browser_bg.wasm" => Some(Self::WasmModule),
+            "/.urspace/wasm/urspace_browser.js"
+            | "/.medousa/wasm/medousa_site_browser.js"
+            | "/.medousa/wasm/urspace_browser.js" => Some(Self::WasmGlue),
+            "/.urspace/wasm/urspace_browser_bg.wasm"
+            | "/.medousa/wasm/medousa_site_browser_bg.wasm"
+            | "/.medousa/wasm/urspace_browser_bg.wasm" => Some(Self::WasmModule),
             _ => None,
         }
     }
 
     fn relative_path(self) -> &'static str {
         match self {
-            Self::Open => ".medousa/open/index.html",
-            Self::Main => ".medousa/assets/main.js",
-            Self::SocketShim => ".medousa/assets/socket-shim.js",
-            Self::Style => ".medousa/assets/style.css",
+            Self::Open => ".urspace/open/index.html",
+            Self::Main => ".urspace/assets/main.js",
+            Self::SocketShim => ".urspace/assets/socket-shim.js",
+            Self::Style => ".urspace/assets/style.css",
             Self::ServiceWorker => "sw.js",
-            Self::WasmGlue => ".medousa/wasm/medousa_site_browser.js",
-            Self::WasmModule => ".medousa/wasm/medousa_site_browser_bg.wasm",
+            Self::WasmGlue => ".urspace/wasm/urspace_browser.js",
+            Self::WasmModule => ".urspace/wasm/urspace_browser_bg.wasm",
         }
     }
 
@@ -354,12 +360,13 @@ mod tests {
 
     #[test]
     fn serves_only_the_explicit_bootstrap_surface() {
-        assert!(Asset::from_uri_path("/.medousa/open/").is_some());
+        assert!(Asset::from_uri_path("/.urspace/open/").is_some());
         assert!(Asset::from_uri_path("/sw.js").is_some());
-        assert!(Asset::from_uri_path("/.medousa/wasm/medousa_site_browser_bg.wasm").is_some());
+        assert!(Asset::from_uri_path("/.urspace/wasm/urspace_browser_bg.wasm").is_some());
+        assert!(Asset::from_uri_path("/.medousa/open/").is_some());
         assert!(Asset::from_uri_path("/").is_none());
-        assert!(Asset::from_uri_path("/.medousa/wasm/../../secret").is_none());
-        assert!(Asset::from_uri_path("/.medousa/open/index.html").is_none());
+        assert!(Asset::from_uri_path("/.urspace/wasm/../../secret").is_none());
+        assert!(Asset::from_uri_path("/.urspace/open/index.html").is_none());
     }
 
     #[tokio::test]
@@ -397,7 +404,7 @@ mod tests {
         let response = handle(
             State(state),
             Method::GET,
-            Uri::from_static("/.medousa/open/"),
+            Uri::from_static("/.urspace/open/"),
             invalid_headers,
         )
         .await;

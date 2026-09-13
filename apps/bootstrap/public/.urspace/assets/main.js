@@ -64,7 +64,7 @@ function armWorker(worker, invitationUrl, onProgress) {
       data?.ok ? resolve(data) : reject(new Error(data?.error || "The invitation was rejected."));
     };
     worker.postMessage(
-      { type: "medousa-arm", invitationUrl, nowUnix: Math.floor(Date.now() / 1000) },
+      { type: "urspace-arm", invitationUrl, nowUnix: Math.floor(Date.now() / 1000) },
       [channel.port2],
     );
   });

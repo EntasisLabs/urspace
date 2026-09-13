@@ -9,12 +9,13 @@ use clap::{Parser, Subcommand};
 use iroh::protocol::Router;
 use iroh::{Endpoint, SecretKey, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
-use medousa_site_host::{CapabilityRegistry, LoopbackSite, SiteProtocol, StaticSite, unix_now};
-use medousa_site_protocol::{
-    ALPN, ClientHello, INVITE_VERSION, InviteGrant, RequestMethod, ServerHello, SiteRequest,
-    SiteResponseHead, invite_url, read_frame, sign_invite, verify_invite_url, write_frame,
-};
 use rand::Rng as _;
+use tokio::io::AsyncBufReadExt as _;
+use urspace_host::{CapabilityRegistry, LoopbackSite, SiteProtocol, StaticSite, unix_now};
+use urspace_protocol::{
+    ALPN, ClientHello, InviteGrant, RequestMethod, ServerHello, SiteRequest, SiteResponseHead,
+    alpn_for_invite, invite_url, read_frame, sign_invite, verify_invite_url, write_frame,
+};
 use uuid::Uuid;
 
 const DEFAULT_BOOTSTRAP_ORIGIN: &str = "https://urspace.online";
@@ -207,27 +208,17 @@ async fn serve_protocol<T>(
         .context("bind Iroh endpoint")?;
     endpoint.online().await;
     let registry = CapabilityRegistry::default();
-    let invite_id = Uuid::new_v4();
-    let capability: [u8; 32] = rand::rng().random();
-    let expires_at_unix = unix_now().saturating_add(ttl_seconds);
-    registry.insert(invite_id, &capability, expires_at_unix, max_sessions);
-
-    let ticket = EndpointTicket::new(endpoint.addr()).to_string();
-    let encoded = sign_invite(
+    let (invite_id, url) = mint_invite(
+        &endpoint,
         &identity,
-        InviteGrant {
-            bootstrap_origin,
-            endpoint_ticket: ticket,
-            invite_id,
-            capability,
-            expires_at_unix,
-            entry_path,
-            max_sessions,
-        },
+        &registry,
+        &bootstrap_origin,
+        ttl_seconds,
+        max_sessions,
+        &entry_path,
     )?;
-    let url = invite_url(&encoded)?;
-    let router = Router::builder(endpoint)
-        .accept(ALPN, make_protocol(registry, site))
+    let router = Router::builder(endpoint.clone())
+        .accept(ALPN, make_protocol(registry.clone(), site))
         .spawn();
 
     println!("Urspace is serving {source_description}");
@@ -236,10 +227,208 @@ async fn serve_protocol<T>(
     println!("Accepts new browser sessions for: {}", format_duration(ttl));
     println!("Maximum admitted browser sessions: {max_sessions}");
     println!("Site identity: {}", identity.public().to_z32());
-    println!("Press Ctrl+C to stop sharing.");
-    tokio::signal::ctrl_c().await?;
+    println!("Commands: invite | rotate | sessions | kick <session> | kick all | help");
+    println!("Press Ctrl+C to stop sharing.\n");
+
+    let console = operator_console(
+        endpoint,
+        identity,
+        registry,
+        bootstrap_origin,
+        ttl_seconds,
+        max_sessions,
+        entry_path,
+        invite_id,
+    );
+    tokio::pin!(console);
+    tokio::select! {
+        signal = tokio::signal::ctrl_c() => signal?,
+        result = &mut console => {
+            result?;
+            tokio::signal::ctrl_c().await?;
+        }
+    }
     router.shutdown().await?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mint_invite(
+    endpoint: &Endpoint,
+    identity: &SecretKey,
+    registry: &CapabilityRegistry,
+    bootstrap_origin: &str,
+    ttl_seconds: i64,
+    max_sessions: u32,
+    entry_path: &str,
+) -> Result<(Uuid, url::Url)> {
+    let invite_id = Uuid::new_v4();
+    let capability: [u8; 32] = rand::rng().random();
+    let expires_at_unix = unix_now().saturating_add(ttl_seconds);
+    let ticket = EndpointTicket::new(endpoint.addr()).to_string();
+    let encoded = sign_invite(
+        identity,
+        InviteGrant {
+            bootstrap_origin: bootstrap_origin.to_owned(),
+            endpoint_ticket: ticket,
+            invite_id,
+            capability,
+            expires_at_unix,
+            entry_path: entry_path.to_owned(),
+            max_sessions,
+        },
+    )?;
+    let url = invite_url(&encoded)?;
+    registry.insert(invite_id, &capability, expires_at_unix, max_sessions);
+    Ok((invite_id, url))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn operator_console(
+    endpoint: Endpoint,
+    identity: SecretKey,
+    registry: CapabilityRegistry,
+    bootstrap_origin: String,
+    ttl_seconds: i64,
+    max_sessions: u32,
+    entry_path: String,
+    mut current_invite_id: Uuid,
+) -> Result<()> {
+    let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    while let Some(line) = lines.next_line().await? {
+        let command = line.trim();
+        match command {
+            "" => {}
+            "invite" | "rotate" => {
+                let url = rotate_invite(
+                    &endpoint,
+                    &identity,
+                    &registry,
+                    &bootstrap_origin,
+                    ttl_seconds,
+                    max_sessions,
+                    &entry_path,
+                    &mut current_invite_id,
+                )?;
+                println!("New share URL (treat it as a secret):\n{url}");
+                println!("Previously admitted sessions remain connected.");
+            }
+            "sessions" => print_sessions(&registry),
+            "kick all" => {
+                let count = registry.kick_all();
+                println!("Kicked {count} admitted session(s).");
+                if count > 0 {
+                    let url = rotate_invite(
+                        &endpoint,
+                        &identity,
+                        &registry,
+                        &bootstrap_origin,
+                        ttl_seconds,
+                        max_sessions,
+                        &entry_path,
+                        &mut current_invite_id,
+                    )?;
+                    println!("The old URL is closed to newcomers. Fresh share URL:\n{url}");
+                }
+            }
+            "help" => {
+                println!("invite          stop new admissions on the old URL and print a new one");
+                println!("rotate          alias for invite");
+                println!("sessions        list admitted browser identities");
+                println!("kick <session>  disconnect and deny one browser identity");
+                println!("kick all        disconnect and deny every admitted browser identity");
+            }
+            command if command.starts_with("kick ") => {
+                if kick_session(&registry, command[5..].trim()) {
+                    let url = rotate_invite(
+                        &endpoint,
+                        &identity,
+                        &registry,
+                        &bootstrap_origin,
+                        ttl_seconds,
+                        max_sessions,
+                        &entry_path,
+                        &mut current_invite_id,
+                    )?;
+                    println!("The old URL is closed to newcomers. Fresh share URL:\n{url}");
+                }
+            }
+            _ => println!("Unknown command. Run `help` for available commands."),
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rotate_invite(
+    endpoint: &Endpoint,
+    identity: &SecretKey,
+    registry: &CapabilityRegistry,
+    bootstrap_origin: &str,
+    ttl_seconds: i64,
+    max_sessions: u32,
+    entry_path: &str,
+    current_invite_id: &mut Uuid,
+) -> Result<url::Url> {
+    let (next_invite_id, url) = mint_invite(
+        endpoint,
+        identity,
+        registry,
+        bootstrap_origin,
+        ttl_seconds,
+        max_sessions,
+        entry_path,
+    )?;
+    registry.close_admissions(*current_invite_id);
+    *current_invite_id = next_invite_id;
+    Ok(url)
+}
+
+fn print_sessions(registry: &CapabilityRegistry) {
+    let sessions = registry.sessions();
+    if sessions.is_empty() {
+        println!("No browser sessions have been admitted.");
+        return;
+    }
+    for session in sessions {
+        let state = if session.connected {
+            "connected"
+        } else {
+            "disconnected (may reconnect)"
+        };
+        println!("{}  {state}", session.endpoint_id.to_z32());
+    }
+}
+
+fn kick_session(registry: &CapabilityRegistry, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        println!("Usage: kick <session-id-prefix>");
+        return false;
+    }
+    let matches: Vec<_> = registry
+        .sessions()
+        .into_iter()
+        .filter(|session| session.endpoint_id.to_z32().starts_with(prefix))
+        .collect();
+    match matches.as_slice() {
+        [] => {
+            println!("No admitted session matches `{prefix}`.");
+            false
+        }
+        [session] => {
+            let endpoint = session.endpoint_id;
+            if registry.kick(endpoint) {
+                println!("Kicked session {}.", endpoint.to_z32());
+                true
+            } else {
+                false
+            }
+        }
+        _ => {
+            println!("Session prefix `{prefix}` is ambiguous; enter more characters.");
+            false
+        }
+    }
 }
 
 async fn get(raw_invite: &str, requested_path: &str) -> Result<()> {
@@ -250,8 +439,9 @@ async fn get(raw_invite: &str, requested_path: &str) -> Result<()> {
         .await
         .context("bind Iroh client")?;
     endpoint.online().await;
+    let alpn = alpn_for_invite(invite.version)?;
     let connection = endpoint
-        .connect(ticket.endpoint_addr().clone(), ALPN)
+        .connect(ticket.endpoint_addr().clone(), alpn)
         .await
         .context("connect to site")?;
 
@@ -259,7 +449,7 @@ async fn get(raw_invite: &str, requested_path: &str) -> Result<()> {
     write_frame(
         &mut hello_send,
         &ClientHello {
-            version: INVITE_VERSION,
+            version: invite.version,
             invite_id: invite.invite_id,
             capability: invite.capability,
         },

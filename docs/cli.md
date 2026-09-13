@@ -42,7 +42,24 @@ lost. If that transport drops while the in-memory Urspace browser session is
 still alive, Urspace reconnects it with the same ephemeral Iroh identity—even
 after the admission window closes. Resumption remains bound to both that
 authenticated endpoint identity and the capability; neither is persisted to
-browser storage. Press Ctrl+C to close the Iroh endpoint and every active session.
+browser storage.
+
+The foreground sharing console provides live controls without restarting the
+site:
+
+```text
+invite          mint a fresh link and close the previous link to newcomers
+rotate          alias for invite
+sessions        list admitted identities and whether each is connected
+kick <session>  disconnect one identity and rotate the outstanding invite
+kick all        disconnect every identity and rotate the outstanding invite
+help            show the commands
+```
+
+Rotation preserves every identity admitted before the old link closed. Kicking
+also rotates the link, so the removed identity cannot reopen the bearer URL as a
+fresh browser session; a new URL is printed for future recipients. Press Ctrl+C
+to close the Iroh endpoint and every active session.
 
 ## Browser compatibility
 

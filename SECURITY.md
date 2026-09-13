@@ -31,6 +31,10 @@ validation is defense in depth, not the authorization boundary.
 - The host retains only a BLAKE3 digest and compares candidate digests in
   constant time.
 - Each capability has an expiry and maximum connection-session count.
+- Rotating an invitation closes it to new browser identities without removing
+  previously admitted identities; kicking an identity removes its admission and
+  closes its current Iroh connection. A kick also rotates the current bearer URL
+  so reopening the known URL under a new ephemeral endpoint cannot regain access.
 - Revocation is consulted for every request, including requests on an already
   authorized connection.
 - Browser code removes the fragment before remote HTML runs and zeroes mutable
@@ -77,7 +81,8 @@ validation is defense in depth, not the authorization boundary.
   malicious local writer racing path resolution. Replace it with capability-based
   directory handles before serving attacker-writable trees.
 - Capability state is memory-only. Restarting the host invalidates every invite
-  (fail closed), and there is not yet a management socket for live revocation.
+  (fail closed). Live rotation and revocation are available only through the
+  foreground host console; there is not yet an authenticated management socket.
 - The browser and loopback proxy buffer each HTTP response up to 64 MiB. Streaming
   responses, SSE, uploads larger than 16 MiB, and stricter content-specific
   limits are not yet supported.
@@ -88,13 +93,13 @@ validation is defense in depth, not the authorization boundary.
   behavior must be tested across target browsers.
 - The WebSocket shim currently supports text/binary frames and close codes, but
   not WebSocket subprotocol negotiation, extensions, or Blob sends.
-- An upstream CSP that disallows `/.medousa/assets/socket-shim.js` will preserve
+- An upstream CSP that disallows `/.urspace/assets/socket-shim.js` will preserve
   its policy and therefore disable the compatibility shim. The bootstrap does
   not silently weaken application CSP.
 
 ## Deliberate exclusions
 
-- No access to the Medousa daemon or its API surface
+- No access to unrelated application daemons or their API surfaces
 - No arbitrary filesystem roots inferred from invitation data
 - No arbitrary command execution or non-loopback reverse proxying
 - No ambient cookies or shared origin across site identities

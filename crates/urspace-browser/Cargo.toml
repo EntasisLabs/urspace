@@ -1,5 +1,5 @@
 [package]
-name = "medousa-site-browser"
+name = "urspace-browser"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 getrandom.workspace = true
 iroh.workspace = true
 iroh-tickets.workspace = true
-medousa-site-protocol = { path = "../medousa-site-protocol" }
+urspace-protocol = { path = "../urspace-protocol" }
 n0-future.workspace = true
 serde.workspace = true
 serde-wasm-bindgen = "0.6"

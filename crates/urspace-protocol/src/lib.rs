@@ -1,4 +1,4 @@
-//! Versioned wire types and self-authenticating invitation URLs for Medousa Sites.
+//! Versioned wire types and self-authenticating invitation URLs for Urspace.
 
 use std::str::FromStr;
 
@@ -10,10 +10,15 @@ use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
-pub const ALPN: &[u8] = b"medousa-site/2";
-pub const INVITE_VERSION: u8 = 2;
+pub const ALPN: &[u8] = b"urspace-site/3";
+pub const INVITE_VERSION: u8 = 3;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
-pub const BOOTSTRAP_PATH: &str = "/.medousa/open/";
+pub const BOOTSTRAP_PATH: &str = "/.urspace/open/";
+
+// Kept only so v0.1 invitation URLs continue to open during the v0.2 migration.
+pub const LEGACY_V2_ALPN: &[u8] = b"medousa-site/2";
+pub const LEGACY_V2_INVITE_VERSION: u8 = 2;
+pub const LEGACY_V2_BOOTSTRAP_PATH: &str = "/.medousa/open/";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvitePayload {
@@ -135,10 +140,19 @@ pub enum InviteError {
 }
 
 pub fn sign_invite(identity: &SecretKey, grant: InviteGrant) -> Result<String, InviteError> {
+    sign_invite_version(identity, grant, INVITE_VERSION)
+}
+
+fn sign_invite_version(
+    identity: &SecretKey,
+    grant: InviteGrant,
+    version: u8,
+) -> Result<String, InviteError> {
+    wire_profile(version)?;
     validate_entry_path(&grant.entry_path)?;
     let bootstrap_origin = normalize_bootstrap_origin(&grant.bootstrap_origin)?;
     let payload = InvitePayload {
-        version: INVITE_VERSION,
+        version,
         bootstrap_origin,
         endpoint_ticket: grant.endpoint_ticket,
         site_id: identity.public().to_z32(),
@@ -160,6 +174,7 @@ pub fn sign_invite(identity: &SecretKey, grant: InviteGrant) -> Result<String, I
 
 pub fn invite_url(encoded: &str) -> Result<Url, InviteError> {
     let signed = decode_signed(encoded)?;
+    let wire = wire_profile(signed.payload.version)?;
     let mut url = Url::parse(&signed.payload.bootstrap_origin)
         .map_err(|_| InviteError::InvalidBootstrapUrl)?;
     let host = format!(
@@ -169,26 +184,33 @@ pub fn invite_url(encoded: &str) -> Result<Url, InviteError> {
     );
     url.set_host(Some(&host))
         .map_err(|_| InviteError::InvalidBootstrapUrl)?;
-    url.set_path(BOOTSTRAP_PATH);
+    url.set_path(wire.bootstrap_path);
     url.set_query(None);
-    url.set_fragment(Some(&format!("m2={encoded}")));
+    url.set_fragment(Some(&format!("{}={encoded}", wire.fragment_prefix)));
     Ok(url)
 }
 
 pub fn verify_invite_url(raw: &str, now_unix: i64) -> Result<InvitePayload, InviteError> {
     let url = Url::parse(raw).map_err(|_| InviteError::InvalidBootstrapUrl)?;
     let fragment = url.fragment().ok_or(InviteError::MissingFragment)?;
-    let encoded = fragment
-        .strip_prefix("m2=")
-        .ok_or(InviteError::MissingFragment)?;
+    let (fragment_version, encoded) = if let Some(encoded) = fragment.strip_prefix("u3=") {
+        (INVITE_VERSION, encoded)
+    } else if let Some(encoded) = fragment.strip_prefix("m2=") {
+        (LEGACY_V2_INVITE_VERSION, encoded)
+    } else {
+        return Err(InviteError::MissingFragment);
+    };
     let signed = decode_signed(encoded)?;
+    if signed.payload.version != fragment_version {
+        return Err(InviteError::UnsupportedVersion);
+    }
     verify_signed(&signed, now_unix)?;
 
     let expected = invite_url(encoded)?;
     if url.scheme() != expected.scheme()
         || url.host_str() != expected.host_str()
         || url.port_or_known_default() != expected.port_or_known_default()
-        || url.path() != BOOTSTRAP_PATH
+        || url.path() != expected.path()
         || url.query().is_some()
     {
         return Err(InviteError::OriginMismatch);
@@ -210,9 +232,7 @@ fn decode_signed(encoded: &str) -> Result<SignedInvite, InviteError> {
 }
 
 fn verify_signed(signed: &SignedInvite, now_unix: i64) -> Result<(), InviteError> {
-    if signed.payload.version != INVITE_VERSION {
-        return Err(InviteError::UnsupportedVersion);
-    }
+    wire_profile(signed.payload.version)?;
     validate_entry_path(&signed.payload.entry_path)?;
     if normalize_bootstrap_origin(&signed.payload.bootstrap_origin)?
         != signed.payload.bootstrap_origin
@@ -245,6 +265,33 @@ fn verify_signed(signed: &SignedInvite, now_unix: i64) -> Result<(), InviteError
         return Err(InviteError::EndpointMismatch);
     }
     Ok(())
+}
+
+pub fn alpn_for_invite(version: u8) -> Result<&'static [u8], InviteError> {
+    Ok(wire_profile(version)?.alpn)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WireProfile {
+    alpn: &'static [u8],
+    bootstrap_path: &'static str,
+    fragment_prefix: &'static str,
+}
+
+fn wire_profile(version: u8) -> Result<WireProfile, InviteError> {
+    match version {
+        INVITE_VERSION => Ok(WireProfile {
+            alpn: ALPN,
+            bootstrap_path: BOOTSTRAP_PATH,
+            fragment_prefix: "u3",
+        }),
+        LEGACY_V2_INVITE_VERSION => Ok(WireProfile {
+            alpn: LEGACY_V2_ALPN,
+            bootstrap_path: LEGACY_V2_BOOTSTRAP_PATH,
+            fragment_prefix: "m2",
+        }),
+        _ => Err(InviteError::UnsupportedVersion),
+    }
 }
 
 fn normalize_bootstrap_origin(raw: &str) -> Result<String, InviteError> {
@@ -338,7 +385,7 @@ mod tests {
         let (identity, encoded, capability) = fixture(2_000);
         let url = invite_url(&encoded).unwrap();
         assert_eq!(url.path(), BOOTSTRAP_PATH);
-        assert!(url.fragment().unwrap().starts_with("m2="));
+        assert!(url.fragment().unwrap().starts_with("u3="));
         let payload = verify_invite_url(url.as_str(), 1_000).unwrap();
         assert_eq!(payload.site_id, identity.public().to_z32());
         assert_eq!(payload.capability, capability);
@@ -357,7 +404,7 @@ mod tests {
     #[test]
     fn wrong_origin_and_expiry_are_rejected() {
         let (_, encoded, _) = fixture(2_000);
-        let wrong = format!("https://attacker.sites.example/.medousa/open/#m2={encoded}");
+        let wrong = format!("https://attacker.sites.example/.urspace/open/#u3={encoded}");
         assert!(matches!(
             verify_invite_url(&wrong, 1_000),
             Err(InviteError::OriginMismatch)
@@ -375,7 +422,7 @@ mod tests {
         assert_eq!(payload.bootstrap_origin, "https://sites.example");
 
         let attacker = format!(
-            "https://{}.attacker.example/.medousa/open/#m2={encoded}",
+            "https://{}.attacker.example/.urspace/open/#u3={encoded}",
             payload.site_id
         );
         assert!(matches!(
@@ -393,6 +440,38 @@ mod tests {
         assert!(matches!(
             normalize_bootstrap_origin("http://sites.example"),
             Err(InviteError::InvalidBootstrapUrl)
+        ));
+    }
+
+    #[test]
+    fn legacy_v2_invites_keep_their_original_url_and_alpn() {
+        let identity = SecretKey::generate();
+        let encoded = sign_invite_version(
+            &identity,
+            InviteGrant {
+                bootstrap_origin: "https://sites.example".into(),
+                endpoint_ticket: EndpointTicket::new(EndpointAddr::new(identity.public()))
+                    .to_string(),
+                invite_id: Uuid::nil(),
+                capability: [3_u8; 32],
+                expires_at_unix: 2_000,
+                entry_path: "/".into(),
+                max_sessions: 1,
+            },
+            LEGACY_V2_INVITE_VERSION,
+        )
+        .unwrap();
+        let url = invite_url(&encoded).unwrap();
+        assert_eq!(url.path(), LEGACY_V2_BOOTSTRAP_PATH);
+        assert!(url.fragment().unwrap().starts_with("m2="));
+        let payload = verify_invite_url(url.as_str(), 1_000).unwrap();
+        assert_eq!(payload.version, LEGACY_V2_INVITE_VERSION);
+        assert_eq!(alpn_for_invite(payload.version).unwrap(), LEGACY_V2_ALPN);
+
+        let mismatched = url.as_str().replace("#m2=", "#u3=");
+        assert!(matches!(
+            verify_invite_url(&mismatched, 1_000),
+            Err(InviteError::UnsupportedVersion)
         ));
     }
 }

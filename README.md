@@ -26,7 +26,7 @@ through GitHub CLI and verifies the selected archive against the release's
 To build the current private preview from source instead:
 
 ```bash
-cargo install --locked --path crates/medousa-site-host
+cargo install --locked --path crates/urspace-host
 ```
 
 Share an app already listening on loopback:
@@ -40,6 +40,15 @@ recipient needs only a modern browser. The app stays on this machine, no inbound
 port is opened, and pressing Ctrl+C stops new traffic immediately. The hour is
 an admission window: browsers already connected remain authorized after it
 closes, while new connections are rejected.
+
+While sharing, the same terminal accepts live operator commands:
+
+- `invite` or `rotate` closes new admissions on the current link and prints a
+  fresh one; already-admitted browsers keep their sessions.
+- `sessions` lists admitted browser identities and connection state.
+- `kick <session>` or `kick all` immediately disconnects selected identities,
+  denies their automatic reconnects, closes the URL they know to newcomers, and
+  prints a fresh URL for future sharing.
 
 Use a stable local identity name and tighter invitation limits when desired:
 
@@ -91,7 +100,7 @@ NODE_ENV=production PORT=8787 npm start
 Build and serve the generic bootstrap locally in another terminal:
 
 ```bash
-cd /Users/theelevators/medousa/medousa-sites/apps/bootstrap
+cd /path/to/urspace/apps/bootstrap
 npm run build
 npm run serve
 ```
@@ -99,8 +108,8 @@ npm run serve
 Then mint the invite and keep the proxy running:
 
 ```bash
-cd /Users/theelevators/medousa/medousa-sites
-cargo run -p medousa-site-host --bin urspace -- serve localhost:8787 \
+cd /path/to/urspace
+cargo run -p urspace-host --bin urspace -- serve localhost:8787 \
   --bootstrap-origin http://localhost:8080 \
   --name boxclub \
   --ttl 1h \
@@ -114,26 +123,26 @@ WebMCP HTTP fallback all traverse the authenticated Iroh connection.
 `localhost` is a same-machine development bootstrap. To share an invite with
 another device, deploy `apps/bootstrap/public` as immutable static files behind
 the `https://urspace.online` wildcard origin. It must route
-`https://<site-id>.urspace.online/.medousa/open/` and serve a wildcard TLS
+`https://<site-id>.urspace.online/.urspace/open/` and serve a wildcard TLS
 certificate. The bootstrap is generic and never receives the fragment over
 HTTP; fragments stay client-side.
 
 ## Static sites
 
 ```bash
-cargo run -p medousa-site-host --bin urspace -- static ./public \
+cargo run -p urspace-host --bin urspace -- static ./public \
   --entry-path /index.html
 ```
 
 The native diagnostic client uses the same invite verification and transport:
 
 ```bash
-cargo run -p medousa-site-host --bin urspace -- get '<invite-url>' /index.html
+cargo run -p urspace-host --bin urspace -- get '<invite-url>' /index.html
 ```
 
 ## Browser boundary
 
-The signed URL uses the reserved `/.medousa/open/` bootstrap path. A root-scoped
+The signed URL uses the reserved `/.urspace/open/` bootstrap path. A root-scoped
 service worker holds the authenticated Iroh client in memory and maps ordinary
 same-origin requests onto independent QUIC streams. It injects only the small
 WebSocket compatibility shim into HTML responses; application scripts otherwise

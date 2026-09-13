@@ -15,7 +15,7 @@ The production Urspace base domain is `urspace.online`. Each invitation uses
 exactly one identity label beneath it:
 
 ```text
-https://<iroh-public-key>.urspace.online/.medousa/open/#m2=<signed-invite>
+https://<iroh-public-key>.urspace.online/.urspace/open/#u3=<signed-invite>
 ```
 
 For the default Urspace deployment, Cloudflare provisions wildcard TLS and runs
@@ -45,10 +45,10 @@ serves the same built assets without an origin server or tunnel.
 For a self-hosted edge, from the repository root:
 
 ```bash
-docker build -f deploy/bootstrap/Dockerfile -t medousa-site-bootstrap .
+docker build -f deploy/bootstrap/Dockerfile -t urspace-bootstrap .
 docker run --read-only --cap-drop=ALL \
   --publish 127.0.0.1:8080:8080 \
-  medousa-site-bootstrap \
+  urspace-bootstrap \
   --base-domain urspace.online
 ```
 
@@ -68,12 +68,12 @@ The server:
 
 ## Verify the edge
 
-Generate a real Iroh public key using `medousa-site-host`, then verify through
+Generate a real Iroh public key using `urspace-host`, then verify through
 the public edge:
 
 ```bash
 curl --fail --show-error --head \
-  https://<site-id>.urspace.online/.medousa/open/
+  https://<site-id>.urspace.online/.urspace/open/
 curl --fail --show-error \
   https://<site-id>.urspace.online/healthz
 ```
@@ -89,8 +89,8 @@ Run BoxClub and its Iroh proxy on the private host, but use the exact public HTT
 origin when minting:
 
 ```bash
-cd /Users/theelevators/medousa/medousa-sites
-cargo run -p medousa-site-host --bin urspace -- serve localhost:8787 \
+cd /path/to/urspace
+cargo run -p urspace-host --bin urspace -- serve localhost:8787 \
   --name boxclub \
   --ttl 1h \
   --max-sessions 4

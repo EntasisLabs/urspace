@@ -9,16 +9,16 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use iroh::EndpointId;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use medousa_site_protocol::{
-    ClientHello, DenialCode, Header, RequestMethod, ServerHello, SiteRequest, SiteResponseHead,
-    SocketMessage, read_frame, write_frame,
-};
 use percent_encoding::percent_decode_str;
 use reqwest::redirect::Policy;
 use subtle::ConstantTimeEq as _;
 use tokio::sync::Semaphore;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
+use urspace_protocol::{
+    ClientHello, DenialCode, Header, RequestMethod, ServerHello, SiteRequest, SiteResponseHead,
+    SocketMessage, read_frame, write_frame,
+};
 use uuid::Uuid;
 
 const MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 64;
@@ -31,7 +31,27 @@ struct InviteRecord {
     expires_at_unix: i64,
     remaining_sessions: u32,
     admitted_endpoints: HashSet<EndpointId>,
+    kicked_endpoints: HashSet<EndpointId>,
+    admissions_closed: bool,
     revoked: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveConnection {
+    stable_id: usize,
+    connection: Connection,
+}
+
+#[derive(Debug, Default)]
+struct RegistryState {
+    invites: HashMap<Uuid, InviteRecord>,
+    active: HashMap<(Uuid, EndpointId), ActiveConnection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub endpoint_id: EndpointId,
+    pub connected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +69,7 @@ impl AuthorizedSession {
 
 #[derive(Debug, Clone, Default)]
 pub struct CapabilityRegistry {
-    inner: Arc<Mutex<HashMap<Uuid, InviteRecord>>>,
+    inner: Arc<Mutex<RegistryState>>,
 }
 
 impl CapabilityRegistry {
@@ -65,11 +85,14 @@ impl CapabilityRegistry {
             expires_at_unix,
             remaining_sessions: max_sessions,
             admitted_endpoints: HashSet::new(),
+            kicked_endpoints: HashSet::new(),
+            admissions_closed: false,
             revoked: false,
         };
         self.inner
             .lock()
             .expect("capability registry poisoned")
+            .invites
             .insert(invite_id, record);
     }
 
@@ -79,16 +102,22 @@ impl CapabilityRegistry {
         endpoint_id: EndpointId,
         now_unix: i64,
     ) -> Result<AuthorizedSession, DenialCode> {
-        if hello.version != medousa_site_protocol::INVITE_VERSION {
+        if hello.version != urspace_protocol::INVITE_VERSION {
             return Err(DenialCode::Invalid);
         }
         let candidate_hash = capability_hash(&hello.capability);
         let mut guard = self.inner.lock().expect("capability registry poisoned");
-        let record = guard.get_mut(&hello.invite_id).ok_or(DenialCode::Invalid)?;
+        let record = guard
+            .invites
+            .get_mut(&hello.invite_id)
+            .ok_or(DenialCode::Invalid)?;
         if record.capability_hash.ct_eq(&candidate_hash).unwrap_u8() != 1 {
             return Err(DenialCode::Invalid);
         }
         if record.revoked {
+            return Err(DenialCode::Revoked);
+        }
+        if record.kicked_endpoints.contains(&endpoint_id) {
             return Err(DenialCode::Revoked);
         }
         if record.admitted_endpoints.contains(&endpoint_id) {
@@ -97,6 +126,9 @@ impl CapabilityRegistry {
                 endpoint_id,
                 invite_expires_at_unix: record.expires_at_unix,
             });
+        }
+        if record.admissions_closed {
+            return Err(DenialCode::Revoked);
         }
         if record.expires_at_unix <= now_unix {
             return Err(DenialCode::Expired);
@@ -117,18 +149,169 @@ impl CapabilityRegistry {
         self.inner
             .lock()
             .expect("capability registry poisoned")
+            .invites
             .get(&session.invite_id)
             .is_some_and(|record| {
-                !record.revoked && record.admitted_endpoints.contains(&session.endpoint_id)
+                !record.revoked
+                    && !record.kicked_endpoints.contains(&session.endpoint_id)
+                    && record.admitted_endpoints.contains(&session.endpoint_id)
             })
     }
 
-    pub fn revoke(&self, invite_id: Uuid) -> bool {
+    pub fn close_admissions(&self, invite_id: Uuid) -> bool {
         let mut guard = self.inner.lock().expect("capability registry poisoned");
-        let Some(record) = guard.get_mut(&invite_id) else {
+        let Some(record) = guard.invites.get_mut(&invite_id) else {
             return false;
         };
-        record.revoked = true;
+        record.admissions_closed = true;
+        true
+    }
+
+    pub fn sessions(&self) -> Vec<SessionInfo> {
+        let guard = self.inner.lock().expect("capability registry poisoned");
+        let mut sessions = HashMap::<EndpointId, bool>::new();
+        for (invite_id, record) in &guard.invites {
+            if record.revoked {
+                continue;
+            }
+            for endpoint_id in &record.admitted_endpoints {
+                if !record.kicked_endpoints.contains(endpoint_id) {
+                    let connected = guard.active.contains_key(&(*invite_id, *endpoint_id));
+                    sessions
+                        .entry(*endpoint_id)
+                        .and_modify(|active| *active |= connected)
+                        .or_insert(connected);
+                }
+            }
+        }
+        let mut sessions: Vec<_> = sessions
+            .into_iter()
+            .map(|(endpoint_id, connected)| SessionInfo {
+                endpoint_id,
+                connected,
+            })
+            .collect();
+        sessions.sort_by_key(|session| session.endpoint_id.to_z32());
+        sessions
+    }
+
+    pub fn kick(&self, endpoint_id: EndpointId) -> bool {
+        let (found, connections) = {
+            let mut guard = self.inner.lock().expect("capability registry poisoned");
+            let mut found = false;
+            for record in guard.invites.values_mut() {
+                if record.admitted_endpoints.remove(&endpoint_id) {
+                    record.kicked_endpoints.insert(endpoint_id);
+                    found = true;
+                }
+            }
+            let keys: Vec<_> = guard
+                .active
+                .keys()
+                .filter(|(_, active_endpoint)| *active_endpoint == endpoint_id)
+                .copied()
+                .collect();
+            let connections: Vec<_> = keys
+                .into_iter()
+                .filter_map(|key| guard.active.remove(&key))
+                .map(|active| active.connection)
+                .collect();
+            (found, connections)
+        };
+        for connection in connections {
+            connection.close(0_u8.into(), b"session kicked by host");
+        }
+        found
+    }
+
+    pub fn kick_all(&self) -> usize {
+        let (count, connections) = {
+            let mut guard = self.inner.lock().expect("capability registry poisoned");
+            let mut endpoints = HashSet::new();
+            for record in guard.invites.values_mut() {
+                let admitted: Vec<_> = record.admitted_endpoints.drain().collect();
+                for endpoint_id in admitted {
+                    record.kicked_endpoints.insert(endpoint_id);
+                    endpoints.insert(endpoint_id);
+                }
+            }
+            let connections = guard
+                .active
+                .drain()
+                .map(|(_, active)| active.connection)
+                .collect::<Vec<_>>();
+            (endpoints.len(), connections)
+        };
+        for connection in connections {
+            connection.close(0_u8.into(), b"session kicked by host");
+        }
+        count
+    }
+
+    fn session_connected(&self, session: AuthorizedSession, connection: Connection) {
+        let stable_id = connection.stable_id();
+        let replaced = {
+            let mut guard = self.inner.lock().expect("capability registry poisoned");
+            let active = guard.invites.get(&session.invite_id).is_some_and(|record| {
+                !record.revoked
+                    && !record.kicked_endpoints.contains(&session.endpoint_id)
+                    && record.admitted_endpoints.contains(&session.endpoint_id)
+            });
+            if !active {
+                drop(guard);
+                connection.close(0_u8.into(), b"browser session is no longer admitted");
+                return;
+            }
+            guard.active.insert(
+                (session.invite_id, session.endpoint_id),
+                ActiveConnection {
+                    stable_id,
+                    connection,
+                },
+            )
+        };
+        if let Some(replaced) = replaced
+            && replaced.stable_id != stable_id
+        {
+            replaced
+                .connection
+                .close(0_u8.into(), b"browser session reconnected");
+        }
+    }
+
+    fn session_disconnected(&self, session: AuthorizedSession, stable_id: usize) {
+        let mut guard = self.inner.lock().expect("capability registry poisoned");
+        let key = (session.invite_id, session.endpoint_id);
+        if guard
+            .active
+            .get(&key)
+            .is_some_and(|active| active.stable_id == stable_id)
+        {
+            guard.active.remove(&key);
+        }
+    }
+
+    pub fn revoke(&self, invite_id: Uuid) -> bool {
+        let connections = {
+            let mut guard = self.inner.lock().expect("capability registry poisoned");
+            let Some(record) = guard.invites.get_mut(&invite_id) else {
+                return false;
+            };
+            record.revoked = true;
+            let keys: Vec<_> = guard
+                .active
+                .keys()
+                .filter(|(active_invite, _)| *active_invite == invite_id)
+                .copied()
+                .collect();
+            keys.into_iter()
+                .filter_map(|key| guard.active.remove(&key))
+                .map(|active| active.connection)
+                .collect::<Vec<_>>()
+        };
+        for connection in connections {
+            connection.close(0_u8.into(), b"invitation revoked by host");
+        }
         true
     }
 }
@@ -327,15 +510,16 @@ impl SiteProtocol {
             return Ok(());
         };
 
+        let stable_id = connection.stable_id();
+        self.registry.session_connected(session, connection.clone());
         let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS_PER_CONNECTION));
         loop {
             let Ok((send, recv)) = connection.accept_bi().await else {
                 break;
             };
-            let permit = Arc::clone(&limit)
-                .acquire_owned()
-                .await
-                .context("request limit closed")?;
+            let Ok(permit) = Arc::clone(&limit).acquire_owned().await else {
+                break;
+            };
             let registry = self.registry.clone();
             let source = self.source.clone();
             tokio::spawn(async move {
@@ -343,6 +527,7 @@ impl SiteProtocol {
                 let _ = serve_request(registry, source, session, send, recv).await;
             });
         }
+        self.registry.session_disconnected(session, stable_id);
         Ok(())
     }
 }
@@ -632,12 +817,14 @@ pub fn unix_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
     use iroh::{Endpoint, SecretKey, endpoint::presets, protocol::Router};
-    use medousa_site_protocol::{ALPN, ServerHello};
+    use urspace_protocol::{ALPN, ServerHello};
 
     fn hello(id: Uuid, capability: [u8; 32]) -> ClientHello {
         ClientHello {
-            version: medousa_site_protocol::INVITE_VERSION,
+            version: urspace_protocol::INVITE_VERSION,
             invite_id: id,
             capability,
         }
@@ -690,6 +877,65 @@ mod tests {
         assert_eq!(
             registry.authorize(&hello(expired_id, capability), endpoint_a, 100),
             Err(DenialCode::Expired)
+        );
+    }
+
+    #[test]
+    fn rotation_preserves_admitted_sessions_and_closes_new_admissions() {
+        let registry = CapabilityRegistry::default();
+        let id = Uuid::new_v4();
+        let capability = [10_u8; 32];
+        let endpoint_a = SecretKey::generate().public();
+        let endpoint_b = SecretKey::generate().public();
+        registry.insert(id, &capability, 200, 2);
+
+        let session = registry
+            .authorize(&hello(id, capability), endpoint_a, 100)
+            .unwrap();
+        assert!(registry.close_admissions(id));
+        assert_eq!(
+            registry.authorize(&hello(id, capability), endpoint_a, 250),
+            Ok(session)
+        );
+        assert_eq!(
+            registry.authorize(&hello(id, capability), endpoint_b, 100),
+            Err(DenialCode::Revoked)
+        );
+        assert_eq!(
+            registry.sessions(),
+            vec![SessionInfo {
+                endpoint_id: endpoint_a,
+                connected: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn kicked_sessions_cannot_reconnect() {
+        let registry = CapabilityRegistry::default();
+        let id = Uuid::new_v4();
+        let capability = [12_u8; 32];
+        let endpoint_a = SecretKey::generate().public();
+        let endpoint_b = SecretKey::generate().public();
+        registry.insert(id, &capability, 200, 2);
+
+        registry
+            .authorize(&hello(id, capability), endpoint_a, 100)
+            .unwrap();
+        registry
+            .authorize(&hello(id, capability), endpoint_b, 100)
+            .unwrap();
+        assert!(registry.kick(endpoint_a));
+        assert_eq!(
+            registry.authorize(&hello(id, capability), endpoint_a, 100),
+            Err(DenialCode::Revoked)
+        );
+        assert_eq!(registry.sessions().len(), 1);
+        assert_eq!(registry.kick_all(), 1);
+        assert!(registry.sessions().is_empty());
+        assert_eq!(
+            registry.authorize(&hello(id, capability), endpoint_b, 100),
+            Err(DenialCode::Revoked)
         );
     }
 
@@ -772,7 +1018,7 @@ mod tests {
             .unwrap();
         let server_addr = server.addr();
         let router = Router::builder(server)
-            .accept(ALPN, SiteProtocol::new(registry, site))
+            .accept(ALPN, SiteProtocol::new(registry.clone(), site))
             .spawn();
         let client = Endpoint::bind(presets::Minimal).await.unwrap();
         let connection = client.connect(server_addr, ALPN).await.unwrap();
@@ -805,6 +1051,18 @@ mod tests {
         assert_eq!(head.content_type.as_deref(), Some("text/html"));
         let body = response_recv.read_to_end(1024).await.unwrap();
         assert_eq!(body, b"mesh works");
+
+        assert_eq!(
+            registry.sessions(),
+            vec![SessionInfo {
+                endpoint_id: client.id(),
+                connected: true,
+            }]
+        );
+        assert!(registry.kick(client.id()));
+        tokio::time::timeout(Duration::from_secs(2), connection.closed())
+            .await
+            .unwrap();
 
         client.close().await;
         router.shutdown().await.unwrap();

@@ -1,14 +1,14 @@
 [workspace]
 members = [
-    "crates/medousa-site-protocol",
-    "crates/medousa-site-host",
-    "crates/medousa-site-browser",
-    "crates/medousa-site-bootstrap",
+    "crates/urspace-protocol",
+    "crates/urspace-host",
+    "crates/urspace-browser",
+    "crates/urspace-bootstrap",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 publish = false
 

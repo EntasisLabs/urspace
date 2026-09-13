@@ -1,5 +1,5 @@
 [package]
-name = "medousa-site-protocol"
+name = "urspace-protocol"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

@@ -18,7 +18,7 @@ jobs:
       - name: Require tag to match the CLI version
         shell: bash
         run: |
-          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "medousa-site-host") | .version')"
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "urspace-host") | .version')"
           test "${GITHUB_REF_NAME}" = "v${package_version}"
 
   unix:
@@ -41,7 +41,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal --target "${{ matrix.target }}"
       - run: rustup default stable
       - name: Build CLI
-        run: cargo build --release --locked -p medousa-site-host --bin urspace --target "${{ matrix.target }}"
+        run: cargo build --release --locked -p urspace-host --bin urspace --target "${{ matrix.target }}"
       - name: Package CLI
         shell: bash
         run: |
@@ -67,7 +67,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal --target $env:TARGET
       - run: rustup default stable
       - name: Build CLI
-        run: cargo build --release --locked -p medousa-site-host --bin urspace --target $env:TARGET
+        run: cargo build --release --locked -p urspace-host --bin urspace --target $env:TARGET
       - name: Package CLI
         shell: pwsh
         run: |

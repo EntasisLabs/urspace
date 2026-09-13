@@ -1,5 +1,5 @@
 [package]
-name = "medousa-site-host"
+name = "urspace-host"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -17,7 +17,7 @@ dirs.workspace = true
 futures-util.workspace = true
 iroh.workspace = true
 iroh-tickets.workspace = true
-medousa-site-protocol = { path = "../medousa-site-protocol" }
+urspace-protocol = { path = "../urspace-protocol" }
 mime_guess.workspace = true
 percent-encoding.workspace = true
 rand.workspace = true

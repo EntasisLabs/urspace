@@ -1731,77 +1731,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
-name = "medousa-site-bootstrap"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "iroh-base",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "medousa-site-browser"
-version = "0.1.1"
-dependencies = [
- "getrandom 0.3.4",
- "iroh",
- "iroh-tickets",
- "medousa-site-protocol",
- "n0-future",
- "serde",
- "serde-wasm-bindgen",
- "tokio",
- "url",
- "uuid",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "zeroize",
-]
-
-[[package]]
-name = "medousa-site-host"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "blake3",
- "clap",
- "dirs",
- "futures-util",
- "iroh",
- "iroh-tickets",
- "medousa-site-protocol",
- "mime_guess",
- "percent-encoding",
- "rand 0.9.5",
- "reqwest 0.12.28",
- "subtle",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "medousa-site-protocol"
-version = "0.1.1"
-dependencies = [
- "base64 0.22.1",
- "iroh-base",
- "iroh-tickets",
- "postcard",
- "serde",
- "thiserror 2.0.20",
- "tokio",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3730,6 +3659,77 @@ dependencies = [
  "percent-encoding",
  "serde",
  "serde_derive",
+]
+
+[[package]]
+name = "urspace-bootstrap"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "iroh-base",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "urspace-browser"
+version = "0.2.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "iroh",
+ "iroh-tickets",
+ "n0-future",
+ "serde",
+ "serde-wasm-bindgen",
+ "tokio",
+ "url",
+ "urspace-protocol",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "zeroize",
+]
+
+[[package]]
+name = "urspace-host"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "blake3",
+ "clap",
+ "dirs",
+ "futures-util",
+ "iroh",
+ "iroh-tickets",
+ "mime_guess",
+ "percent-encoding",
+ "rand 0.9.5",
+ "reqwest 0.12.28",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+ "urspace-protocol",
+ "uuid",
+]
+
+[[package]]
+name = "urspace-protocol"
+version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "iroh-base",
+ "iroh-tickets",
+ "postcard",
+ "serde",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
+ "uuid",
 ]
 
 [[package]]

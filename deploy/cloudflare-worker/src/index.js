@@ -2,13 +2,25 @@ const BASE_DOMAIN = "urspace.online";
 const Z32_ALPHABET = "ybndrfg8ejkmcpqxot1uwisza345h769";
 
 const ASSETS = new Map([
-  ["/.medousa/open/", ["/.medousa/open/index.html", "text/html; charset=utf-8"]],
-  ["/.medousa/assets/main.js", ["/.medousa/assets/main.js", "text/javascript; charset=utf-8"]],
-  ["/.medousa/assets/socket-shim.js", ["/.medousa/assets/socket-shim.js", "text/javascript; charset=utf-8"]],
-  ["/.medousa/assets/style.css", ["/.medousa/assets/style.css", "text/css; charset=utf-8"]],
+  ["/.urspace/open/", ["/.urspace/open/index.html", "text/html; charset=utf-8"]],
+  ["/.urspace/assets/main.js", ["/.urspace/assets/main.js", "text/javascript; charset=utf-8"]],
+  ["/.urspace/assets/socket-shim.js", ["/.urspace/assets/socket-shim.js", "text/javascript; charset=utf-8"]],
+  ["/.urspace/assets/style.css", ["/.urspace/assets/style.css", "text/css; charset=utf-8"]],
   ["/sw.js", ["/sw.js", "text/javascript; charset=utf-8"]],
-  ["/.medousa/wasm/medousa_site_browser.js", ["/.medousa/wasm/medousa_site_browser.js", "text/javascript; charset=utf-8"]],
-  ["/.medousa/wasm/medousa_site_browser_bg.wasm", ["/.medousa/wasm/medousa_site_browser_bg.wasm", "application/wasm"]],
+  ["/.urspace/wasm/urspace_browser.js", ["/.urspace/wasm/urspace_browser.js", "text/javascript; charset=utf-8"]],
+  ["/.urspace/wasm/urspace_browser_bg.wasm", ["/.urspace/wasm/urspace_browser_bg.wasm", "application/wasm"]],
+]);
+
+// v0.1 links request these paths. All aliases resolve to current Urspace assets.
+const LEGACY_V2_ASSETS = new Map([
+  ["/.medousa/open/", ["/.urspace/open/index.html", "text/html; charset=utf-8"]],
+  ["/.medousa/assets/main.js", ["/.urspace/assets/main.js", "text/javascript; charset=utf-8"]],
+  ["/.medousa/assets/socket-shim.js", ["/.urspace/assets/socket-shim.js", "text/javascript; charset=utf-8"]],
+  ["/.medousa/assets/style.css", ["/.urspace/assets/style.css", "text/css; charset=utf-8"]],
+  ["/.medousa/wasm/medousa_site_browser.js", ["/.urspace/wasm/urspace_browser.js", "text/javascript; charset=utf-8"]],
+  ["/.medousa/wasm/medousa_site_browser_bg.wasm", ["/.urspace/wasm/urspace_browser_bg.wasm", "application/wasm"]],
+  ["/.medousa/wasm/urspace_browser.js", ["/.urspace/wasm/urspace_browser.js", "text/javascript; charset=utf-8"]],
+  ["/.medousa/wasm/urspace_browser_bg.wasm", ["/.urspace/wasm/urspace_browser_bg.wasm", "application/wasm"]],
 ]);
 
 const SECURITY_HEADERS = {
@@ -84,7 +96,7 @@ async function handleRequest(request, env) {
     return response("invalid site hostname\n", 421, { "Content-Type": "text/plain; charset=utf-8" });
   }
 
-  const asset = ASSETS.get(url.pathname);
+  const asset = ASSETS.get(url.pathname) || LEGACY_V2_ASSETS.get(url.pathname);
   if (!asset) {
     return response("not found\n", 404, { "Content-Type": "text/plain; charset=utf-8" });
   }
@@ -107,7 +119,7 @@ async function handleRequest(request, env) {
   });
 }
 
-export { ASSETS, handleRequest, isCanonicalSiteHost, isCanonicalZ32KeyLabel };
+export { ASSETS, LEGACY_V2_ASSETS, handleRequest, isCanonicalSiteHost, isCanonicalZ32KeyLabel };
 
 export default {
   fetch: handleRequest,

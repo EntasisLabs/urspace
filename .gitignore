@@ -6,4 +6,4 @@
 /deploy/cloudflare-worker/node_modules/
 /deploy/cloudflare-worker/.wrangler/
 /deploy/cloudflare-worker/.wrangler-dist/
-/apps/bootstrap/public/.medousa/wasm/
+/apps/bootstrap/public/.urspace/wasm/

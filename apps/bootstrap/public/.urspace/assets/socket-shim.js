@@ -19,7 +19,7 @@
       this.onclose = null;
       const url = new URL(this.url);
       if (!['ws:', 'wss:'].includes(url.protocol) || url.host !== location.host) {
-        throw new DOMException("Medousa Sites sockets must be same-origin", "SecurityError");
+        throw new DOMException("Urspace sockets must be same-origin", "SecurityError");
       }
       if (protocols && (Array.isArray(protocols) ? protocols.length : String(protocols))) {
         throw new DOMException("WebSocket subprotocols are not supported yet", "NotSupportedError");
@@ -28,7 +28,7 @@
       this._port = channel.port1;
       this._port.onmessage = ({ data }) => this._receive(data);
       navigator.serviceWorker.controller.postMessage(
-        { type: "medousa-socket", path: `${url.pathname}${url.search}` },
+        { type: "urspace-socket", path: `${url.pathname}${url.search}` },
         [channel.port2],
       );
     }

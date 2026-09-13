@@ -35,7 +35,7 @@ After deployment:
 
 ```bash
 curl -i https://urspace.online/healthz
-cargo run -p medousa-site-cli -- serve http://127.0.0.1:8787
+cargo run -p urspace-host --bin urspace -- serve http://127.0.0.1:8787
 ```
 
 Open the URL printed by the CLI. A valid site URL should load the bootstrap from
@@ -51,4 +51,4 @@ therefore a replaceable rendezvous for code delivery, not the app-data transport
 or authority.
 
 For operators who want no Cloudflare dependency, the hardened Rust bootstrap
-server and container remain available in `crates/medousa-site-bootstrap`.
+server and container remain available in `crates/urspace-bootstrap`.

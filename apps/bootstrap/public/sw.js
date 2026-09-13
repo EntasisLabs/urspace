@@ -1,7 +1,7 @@
-import init, { SiteClient } from "/.medousa/wasm/medousa_site_browser.js";
+import init, { SiteClient } from "/.urspace/wasm/urspace_browser.js";
 
-const BOOTSTRAP_REVISION = "v5-sticky-sessions-1";
-const RESERVED_PREFIX = "/.medousa/";
+const BOOTSTRAP_REVISION = "v6-urspace-control-1";
+const RESERVED_PREFIXES = ["/.urspace/", "/.medousa/"];
 const MAX_BROWSER_REQUEST_BYTES = 16 * 1024 * 1024;
 let client = null;
 let wasmReady = null;
@@ -10,9 +10,9 @@ self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
 self.addEventListener("message", (event) => {
-  if (event.data?.type === "medousa-arm") {
+  if (["urspace-arm", "medousa-arm"].includes(event.data?.type)) {
     event.waitUntil(arm(event.data, event.ports[0]));
-  } else if (event.data?.type === "medousa-socket") {
+  } else if (["urspace-socket", "medousa-socket"].includes(event.data?.type)) {
     event.waitUntil(openSocket(event.data.path, event.ports[0]));
   }
 });
@@ -44,7 +44,7 @@ async function arm(message, port) {
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
-  if (url.origin !== self.location.origin || url.pathname === "/sw.js" || url.pathname.startsWith(RESERVED_PREFIX)) {
+  if (url.origin !== self.location.origin || url.pathname === "/sw.js" || RESERVED_PREFIXES.some((prefix) => url.pathname.startsWith(prefix))) {
     return;
   }
   event.respondWith(meshFetch(event.request));
@@ -91,7 +91,7 @@ async function meshFetch(request) {
     let bytes = new Uint8Array(response.body);
     if (response.status === 200 && response.content_type?.toLowerCase().startsWith("text/html")) {
       const html = new TextDecoder().decode(bytes);
-      const shim = '<script src="/.medousa/assets/socket-shim.js"></script>';
+      const shim = '<script src="/.urspace/assets/socket-shim.js"></script>';
       const injected = /<head(?:\s[^>]*)?>/i.test(html)
         ? html.replace(/<head(?:\s[^>]*)?>/i, (head) => `${head}${shim}`)
         : `${shim}${html}`;
