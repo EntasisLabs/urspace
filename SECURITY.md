@@ -17,6 +17,7 @@ be used to confirm regressions but should not be assumed to receive patches.
 
 - Site endpoint private key
 - Unexpired invitation capabilities
+- Unexpired short-link fragment seeds
 - Files below the explicitly shared site root
 - Integrity of the endpoint identity, route, bootstrap origin, and grant limits
 
@@ -54,6 +55,28 @@ validation is defense in depth, not the authorization boundary.
   invitation or capability into browser persistence.
 - Synthetic site responses are marked `Cache-Control: no-store`; neither the
   capability nor proxied site content is intentionally persisted by the bootstrap.
+
+## Encrypted short links
+
+Shortening is explicit operator opt-in. The CLI generates a separate random
+256-bit seed, derives a 128-bit opaque lookup id and AES-256-GCM key using
+HKDF-SHA-256, and encrypts the complete signed invitation locally. Only the
+lookup id, authenticated ciphertext, random nonce, and expiry are sent to the
+short-link service. The seed stays in the URL fragment and is not included in
+HTTP requests.
+
+The browser removes the seed fragment before retrieval, derives the same lookup
+id and key, authenticates and decrypts the envelope, and accepts only a
+capability-derived Urspace origin beneath the same base domain. The existing
+signed-invitation verification then runs unchanged. Modified ciphertext, nonce,
+expiry, or destination fails closed.
+
+Encrypted records are size bounded, creation-rate limited, stored in isolated
+SQLite-backed Durable Objects, and deleted by an expiry alarm. The service can
+observe IP addresses, timing, lookup ids, and ciphertext sizes. A compromised
+service can delete or withhold records, but cannot recover a capability or forge
+a valid replacement. Direct invitation URLs remain available through the
+operator console and do not depend on this service.
 
 ## Loopback proxy boundary
 
@@ -97,6 +120,9 @@ validation is defense in depth, not the authorization boundary.
   responses, SSE, uploads larger than 16 MiB, and stricter content-specific
   limits are not yet supported.
 - Browser Iroh endpoints are relay-only under current Web platform constraints.
+- A short link adds a centralized first-open availability dependency. If the
+  resolver is unavailable, recipients need the direct invitation printed by the
+  `raw` console command. Application traffic never traverses the resolver.
 - Browsers may terminate an idle service worker. This intentionally loses the
   in-memory capability and requires reopening the invite. An active BoxClub
   WebSocket keeps the worker operation alive in tested browsers, but lifecycle

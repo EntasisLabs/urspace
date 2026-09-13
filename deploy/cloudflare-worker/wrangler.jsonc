@@ -15,5 +15,37 @@
     "directory": "../../apps/bootstrap/public",
     "binding": "ASSETS",
     "run_worker_first": true
-  }
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SHORT_LINKS",
+        "class_name": "ShortLinkStore"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "short-links-v1",
+      "new_sqlite_classes": ["ShortLinkStore"]
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "SHORT_LINK_CREATES",
+      "namespace_id": "31001",
+      "simple": {
+        "limit": 30,
+        "period": 60
+      }
+    },
+    {
+      "name": "SHORT_LINK_READS",
+      "namespace_id": "31002",
+      "simple": {
+        "limit": 120,
+        "period": 60
+      }
+    }
+  ]
 }

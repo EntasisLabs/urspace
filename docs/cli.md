@@ -12,6 +12,20 @@ must not contain credentials, a path, query, or fragment. Urspace deliberately
 cannot become an open proxy to LAN or Internet services. It verifies that the
 local port is accepting connections before creating an identity or Iroh endpoint.
 
+Direct capability URLs are the default and require no storage service. Add
+`--short` to publish an encrypted short-link envelope:
+
+```bash
+urspace serve localhost:8787 --short
+```
+
+The resulting `https://u.urspace.online/#s1=…` link carries a random 256-bit
+seed in its fragment. The CLI derives an opaque lookup id and AES-256-GCM key
+with HKDF-SHA-256, uploads only the encrypted signed invite, and falls back to
+the direct link if publishing fails. The official short-link service accepts a
+maximum seven-day TTL. `--short-origin` is available as an advanced option for
+compatible deployments under another base domain.
+
 ## Invitation controls
 
 ```bash
@@ -50,6 +64,7 @@ site:
 ```text
 invite          mint a fresh link and close the previous link to newcomers
 rotate          alias for invite
+raw             print the current direct capability URL
 sessions        list admitted identities and whether each is connected
 kick <session>  disconnect one identity and rotate the outstanding invite
 kick all        disconnect every identity and rotate the outstanding invite

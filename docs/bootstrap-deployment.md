@@ -37,6 +37,11 @@ The URL fragment is never included in an HTTP request, reverse-proxy log, or TLS
 request path. The site identity in the hostname is public; the fragment is the
 secret.
 
+The optional `u.urspace.online` resolver uses the same rule. Its fragment holds
+a short-link seed; the Worker receives only a derived lookup id and an encrypted
+invite envelope. The resolver requires a SQLite-backed Durable Object binding
+and is intentionally not implemented by the static self-hosted container.
+
 ## Build and run
 
 Cloudflare users do not need this container or a VM. The Worker deployment above
@@ -110,8 +115,9 @@ it dials the BoxClub host over Iroh.
   bytes during updates; changing only an HTTP header does not replace an already
   installed worker. The bootstrap explicitly checks for an update before arming.
 - Never add analytics, third-party scripts, remote fonts, or tag managers.
-- Never accept invitation data through a query parameter, request body, cookie,
-  or server-side redirect. Only the browser-local fragment is valid.
+- Never accept a plaintext invitation or capability through a query parameter,
+  request body, cookie, or server-side redirect. The short-link API accepts only
+  bounded authenticated ciphertext; only a browser-local fragment can decrypt it.
 - Do not terminate the Iroh connection at the bootstrap server. It is a static
   code origin, not a relay or application proxy.
 - Rotate deployment credentials after suspected compromise. Previously minted
