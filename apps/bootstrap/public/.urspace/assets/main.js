@@ -109,6 +109,7 @@ function validateExpandedInvite(raw, shortHostname) {
     : "";
   const validSiteLabel = !siteLabel.includes(".") && isCanonicalSiteLabel(siteLabel);
   const validPath =
+    (invite.pathname === "/.urspace/open/" && invite.hash.startsWith("#u4=")) ||
     (invite.pathname === "/.urspace/open/" && invite.hash.startsWith("#u3=")) ||
     (invite.pathname === "/.medousa/open/" && invite.hash.startsWith("#m2="));
   if (

@@ -2,38 +2,52 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt as _, StreamExt as _};
-use iroh::EndpointId;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
+use iroh::{EndpointId, SecretKey};
 use percent_encoding::percent_decode_str;
+use rand::Rng as _;
 use reqwest::redirect::Policy;
 use subtle::ConstantTimeEq as _;
 use tokio::sync::Semaphore;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 use urspace_protocol::{
-    ClientHello, DenialCode, Header, RequestMethod, ServerHello, SiteRequest, SiteResponseHead,
-    SocketMessage, read_frame, write_frame,
+    ALPN, ClientAuthV4, ClientProofV4, DenialCode, Header, RequestMethod, ServerAuthV4,
+    ServerHelloV4, SessionChallengeV4, SessionGrantIssue, SessionGrantPayload, SessionProofPayload,
+    SessionProofPurpose, SiteRequest, SiteResponseHead, SocketMessage, read_frame,
+    session_grant_hash, sign_session_grant, verify_session_grant, verify_session_proof,
+    write_frame,
 };
 use uuid::Uuid;
 
 const MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 64;
 const MAX_REQUEST_BODY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
+const SESSION_CHALLENGE_TTL_SECONDS: i64 = 15;
+const SESSION_GRANT_EXPIRY_UNIX: i64 = i64::MAX;
 
 #[derive(Debug, Clone)]
 struct InviteRecord {
     capability_hash: [u8; 32],
     expires_at_unix: i64,
     remaining_sessions: u32,
-    admitted_endpoints: HashSet<EndpointId>,
-    kicked_endpoints: HashSet<EndpointId>,
+    admitted_sessions: HashSet<Uuid>,
     admissions_closed: bool,
     revoked: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SessionRecord {
+    invite_id: Uuid,
+    session_public_key: [u8; 32],
+    authorization_epoch: u64,
+    endpoint_id: EndpointId,
+    kicked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -45,25 +59,27 @@ struct ActiveConnection {
 #[derive(Debug, Default)]
 struct RegistryState {
     invites: HashMap<Uuid, InviteRecord>,
-    active: HashMap<(Uuid, EndpointId), ActiveConnection>,
+    sessions: HashMap<Uuid, SessionRecord>,
+    active: HashMap<Uuid, ActiveConnection>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionInfo {
+    pub session_id: Uuid,
     pub endpoint_id: EndpointId,
     pub connected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorizedSession {
+    session_id: Uuid,
     invite_id: Uuid,
     endpoint_id: EndpointId,
-    invite_expires_at_unix: i64,
 }
 
 impl AuthorizedSession {
-    pub fn invite_expires_at_unix(self) -> i64 {
-        self.invite_expires_at_unix
+    pub fn session_id(self) -> Uuid {
+        self.session_id
     }
 }
 
@@ -84,8 +100,7 @@ impl CapabilityRegistry {
             capability_hash: capability_hash(capability),
             expires_at_unix,
             remaining_sessions: max_sessions,
-            admitted_endpoints: HashSet::new(),
-            kicked_endpoints: HashSet::new(),
+            admitted_sessions: HashSet::new(),
             admissions_closed: false,
             revoked: false,
         };
@@ -96,36 +111,20 @@ impl CapabilityRegistry {
             .insert(invite_id, record);
     }
 
-    pub fn authorize(
+    pub fn can_admit(
         &self,
-        hello: &ClientHello,
-        endpoint_id: EndpointId,
+        invite_id: Uuid,
+        capability: &[u8; 32],
         now_unix: i64,
-    ) -> Result<AuthorizedSession, DenialCode> {
-        if hello.version != urspace_protocol::INVITE_VERSION {
-            return Err(DenialCode::Invalid);
-        }
-        let candidate_hash = capability_hash(&hello.capability);
-        let mut guard = self.inner.lock().expect("capability registry poisoned");
-        let record = guard
-            .invites
-            .get_mut(&hello.invite_id)
-            .ok_or(DenialCode::Invalid)?;
+    ) -> Result<(), DenialCode> {
+        let candidate_hash = capability_hash(capability);
+        let guard = self.inner.lock().expect("capability registry poisoned");
+        let record = guard.invites.get(&invite_id).ok_or(DenialCode::Invalid)?;
         if record.capability_hash.ct_eq(&candidate_hash).unwrap_u8() != 1 {
             return Err(DenialCode::Invalid);
         }
         if record.revoked {
             return Err(DenialCode::Revoked);
-        }
-        if record.kicked_endpoints.contains(&endpoint_id) {
-            return Err(DenialCode::Revoked);
-        }
-        if record.admitted_endpoints.contains(&endpoint_id) {
-            return Ok(AuthorizedSession {
-                invite_id: hello.invite_id,
-                endpoint_id,
-                invite_expires_at_unix: record.expires_at_unix,
-            });
         }
         if record.admissions_closed {
             return Err(DenialCode::Revoked);
@@ -136,26 +135,117 @@ impl CapabilityRegistry {
         if record.remaining_sessions == 0 {
             return Err(DenialCode::SessionLimit);
         }
-        record.remaining_sessions -= 1;
-        record.admitted_endpoints.insert(endpoint_id);
-        Ok(AuthorizedSession {
-            invite_id: hello.invite_id,
+        Ok(())
+    }
+
+    pub fn admit(
+        &self,
+        invite_id: Uuid,
+        capability: &[u8; 32],
+        session_id: Uuid,
+        session_public_key: [u8; 32],
+        endpoint_id: EndpointId,
+        now_unix: i64,
+    ) -> Result<AuthorizedSession, DenialCode> {
+        self.can_admit_locked(
+            invite_id,
+            capability,
+            session_id,
+            session_public_key,
             endpoint_id,
-            invite_expires_at_unix: record.expires_at_unix,
+            now_unix,
+        )
+    }
+
+    fn can_admit_locked(
+        &self,
+        invite_id: Uuid,
+        capability: &[u8; 32],
+        session_id: Uuid,
+        session_public_key: [u8; 32],
+        endpoint_id: EndpointId,
+        now_unix: i64,
+    ) -> Result<AuthorizedSession, DenialCode> {
+        let candidate_hash = capability_hash(capability);
+        let mut guard = self.inner.lock().expect("capability registry poisoned");
+        if guard.sessions.contains_key(&session_id) {
+            return Err(DenialCode::Invalid);
+        }
+        let record = guard
+            .invites
+            .get_mut(&invite_id)
+            .ok_or(DenialCode::Invalid)?;
+        if record.capability_hash.ct_eq(&candidate_hash).unwrap_u8() != 1 {
+            return Err(DenialCode::Invalid);
+        }
+        if record.revoked || record.admissions_closed {
+            return Err(DenialCode::Revoked);
+        }
+        if record.expires_at_unix <= now_unix {
+            return Err(DenialCode::Expired);
+        }
+        if record.remaining_sessions == 0 {
+            return Err(DenialCode::SessionLimit);
+        }
+        record.remaining_sessions -= 1;
+        record.admitted_sessions.insert(session_id);
+        guard.sessions.insert(
+            session_id,
+            SessionRecord {
+                invite_id,
+                session_public_key,
+                authorization_epoch: 0,
+                endpoint_id,
+                kicked: false,
+            },
+        );
+        Ok(AuthorizedSession {
+            session_id,
+            invite_id,
+            endpoint_id,
+        })
+    }
+
+    pub fn can_resume(
+        &self,
+        grant: &urspace_protocol::SessionGrantPayload,
+    ) -> Result<(), DenialCode> {
+        let guard = self.inner.lock().expect("capability registry poisoned");
+        validate_grant_record(&guard, grant).map(|_| ())
+    }
+
+    pub fn resume(
+        &self,
+        grant: &urspace_protocol::SessionGrantPayload,
+        endpoint_id: EndpointId,
+    ) -> Result<AuthorizedSession, DenialCode> {
+        let mut guard = self.inner.lock().expect("capability registry poisoned");
+        validate_grant_record(&guard, grant)?;
+        let record = guard
+            .sessions
+            .get_mut(&grant.session_id)
+            .ok_or(DenialCode::Invalid)?;
+        record.endpoint_id = endpoint_id;
+        Ok(AuthorizedSession {
+            session_id: grant.session_id,
+            invite_id: grant.invite_id,
+            endpoint_id,
         })
     }
 
     pub fn session_is_active(&self, session: AuthorizedSession) -> bool {
-        self.inner
-            .lock()
-            .expect("capability registry poisoned")
+        let guard = self.inner.lock().expect("capability registry poisoned");
+        let Some(record) = guard.sessions.get(&session.session_id) else {
+            return false;
+        };
+        let invite_active = guard
             .invites
             .get(&session.invite_id)
-            .is_some_and(|record| {
-                !record.revoked
-                    && !record.kicked_endpoints.contains(&session.endpoint_id)
-                    && record.admitted_endpoints.contains(&session.endpoint_id)
-            })
+            .is_some_and(|invite| !invite.revoked);
+        invite_active
+            && !record.kicked
+            && record.invite_id == session.invite_id
+            && record.endpoint_id == session.endpoint_id
     }
 
     pub fn close_admissions(&self, invite_id: Uuid) -> bool {
@@ -169,70 +259,54 @@ impl CapabilityRegistry {
 
     pub fn sessions(&self) -> Vec<SessionInfo> {
         let guard = self.inner.lock().expect("capability registry poisoned");
-        let mut sessions = HashMap::<EndpointId, bool>::new();
-        for (invite_id, record) in &guard.invites {
-            if record.revoked {
-                continue;
-            }
-            for endpoint_id in &record.admitted_endpoints {
-                if !record.kicked_endpoints.contains(endpoint_id) {
-                    let connected = guard.active.contains_key(&(*invite_id, *endpoint_id));
-                    sessions
-                        .entry(*endpoint_id)
-                        .and_modify(|active| *active |= connected)
-                        .or_insert(connected);
-                }
-            }
-        }
-        let mut sessions: Vec<_> = sessions
-            .into_iter()
-            .map(|(endpoint_id, connected)| SessionInfo {
-                endpoint_id,
-                connected,
+        let mut sessions: Vec<_> = guard
+            .sessions
+            .iter()
+            .filter_map(|(session_id, record)| {
+                let invite_active = guard
+                    .invites
+                    .get(&record.invite_id)
+                    .is_some_and(|invite| !invite.revoked);
+                (invite_active && !record.kicked).then_some(SessionInfo {
+                    session_id: *session_id,
+                    endpoint_id: record.endpoint_id,
+                    connected: guard.active.contains_key(session_id),
+                })
             })
             .collect();
-        sessions.sort_by_key(|session| session.endpoint_id.to_z32());
+        sessions.sort_by_key(|session| session.session_id);
         sessions
     }
 
-    pub fn kick(&self, endpoint_id: EndpointId) -> bool {
-        let (found, connections) = {
+    pub fn kick(&self, session_id: Uuid) -> bool {
+        let connection = {
             let mut guard = self.inner.lock().expect("capability registry poisoned");
-            let mut found = false;
-            for record in guard.invites.values_mut() {
-                if record.admitted_endpoints.remove(&endpoint_id) {
-                    record.kicked_endpoints.insert(endpoint_id);
-                    found = true;
-                }
+            let Some(record) = guard.sessions.get_mut(&session_id) else {
+                return false;
+            };
+            if record.kicked {
+                return false;
             }
-            let keys: Vec<_> = guard
+            record.kicked = true;
+            guard
                 .active
-                .keys()
-                .filter(|(_, active_endpoint)| *active_endpoint == endpoint_id)
-                .copied()
-                .collect();
-            let connections: Vec<_> = keys
-                .into_iter()
-                .filter_map(|key| guard.active.remove(&key))
+                .remove(&session_id)
                 .map(|active| active.connection)
-                .collect();
-            (found, connections)
         };
-        for connection in connections {
+        if let Some(connection) = connection {
             connection.close(0_u8.into(), b"session kicked by host");
         }
-        found
+        true
     }
 
     pub fn kick_all(&self) -> usize {
         let (count, connections) = {
             let mut guard = self.inner.lock().expect("capability registry poisoned");
-            let mut endpoints = HashSet::new();
-            for record in guard.invites.values_mut() {
-                let admitted: Vec<_> = record.admitted_endpoints.drain().collect();
-                for endpoint_id in admitted {
-                    record.kicked_endpoints.insert(endpoint_id);
-                    endpoints.insert(endpoint_id);
+            let mut count = 0;
+            for record in guard.sessions.values_mut() {
+                if !record.kicked {
+                    record.kicked = true;
+                    count += 1;
                 }
             }
             let connections = guard
@@ -240,7 +314,7 @@ impl CapabilityRegistry {
                 .drain()
                 .map(|(_, active)| active.connection)
                 .collect::<Vec<_>>();
-            (endpoints.len(), connections)
+            (count, connections)
         };
         for connection in connections {
             connection.close(0_u8.into(), b"session kicked by host");
@@ -252,18 +326,21 @@ impl CapabilityRegistry {
         let stable_id = connection.stable_id();
         let replaced = {
             let mut guard = self.inner.lock().expect("capability registry poisoned");
-            let active = guard.invites.get(&session.invite_id).is_some_and(|record| {
-                !record.revoked
-                    && !record.kicked_endpoints.contains(&session.endpoint_id)
-                    && record.admitted_endpoints.contains(&session.endpoint_id)
-            });
+            let active = guard
+                .sessions
+                .get(&session.session_id)
+                .is_some_and(|record| !record.kicked && record.endpoint_id == session.endpoint_id)
+                && guard
+                    .invites
+                    .get(&session.invite_id)
+                    .is_some_and(|invite| !invite.revoked);
             if !active {
                 drop(guard);
                 connection.close(0_u8.into(), b"browser session is no longer admitted");
                 return;
             }
             guard.active.insert(
-                (session.invite_id, session.endpoint_id),
+                session.session_id,
                 ActiveConnection {
                     stable_id,
                     connection,
@@ -281,13 +358,12 @@ impl CapabilityRegistry {
 
     fn session_disconnected(&self, session: AuthorizedSession, stable_id: usize) {
         let mut guard = self.inner.lock().expect("capability registry poisoned");
-        let key = (session.invite_id, session.endpoint_id);
         if guard
             .active
-            .get(&key)
+            .get(&session.session_id)
             .is_some_and(|active| active.stable_id == stable_id)
         {
-            guard.active.remove(&key);
+            guard.active.remove(&session.session_id);
         }
     }
 
@@ -298,14 +374,16 @@ impl CapabilityRegistry {
                 return false;
             };
             record.revoked = true;
-            let keys: Vec<_> = guard
-                .active
-                .keys()
-                .filter(|(active_invite, _)| *active_invite == invite_id)
-                .copied()
+            let session_ids: Vec<_> = guard
+                .sessions
+                .iter()
+                .filter_map(|(session_id, session)| {
+                    (session.invite_id == invite_id).then_some(*session_id)
+                })
                 .collect();
-            keys.into_iter()
-                .filter_map(|key| guard.active.remove(&key))
+            session_ids
+                .into_iter()
+                .filter_map(|session_id| guard.active.remove(&session_id))
                 .map(|active| active.connection)
                 .collect::<Vec<_>>()
         };
@@ -314,6 +392,30 @@ impl CapabilityRegistry {
         }
         true
     }
+}
+
+fn validate_grant_record<'a>(
+    state: &'a RegistryState,
+    grant: &urspace_protocol::SessionGrantPayload,
+) -> Result<&'a SessionRecord, DenialCode> {
+    let session = state
+        .sessions
+        .get(&grant.session_id)
+        .ok_or(DenialCode::Invalid)?;
+    let invite = state
+        .invites
+        .get(&session.invite_id)
+        .ok_or(DenialCode::Invalid)?;
+    if invite.revoked || session.kicked {
+        return Err(DenialCode::Revoked);
+    }
+    if session.invite_id != grant.invite_id
+        || session.session_public_key != grant.session_public_key
+        || session.authorization_epoch != grant.authorization_epoch
+    {
+        return Err(DenialCode::Invalid);
+    }
+    Ok(session)
 }
 
 fn capability_hash(capability: &[u8; 32]) -> [u8; 32] {
@@ -457,20 +559,51 @@ fn map_io_error(error: io::Error) -> ResolveError {
 pub struct SiteProtocol {
     registry: CapabilityRegistry,
     source: SiteSource,
+    issuer: SessionGrantIssuer,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionGrantIssuer {
+    identity: SecretKey,
+    bootstrap_origin: String,
+    endpoint_ticket: String,
+    entry_path: String,
+}
+
+impl SessionGrantIssuer {
+    pub fn new(
+        identity: SecretKey,
+        bootstrap_origin: String,
+        endpoint_ticket: String,
+        entry_path: String,
+    ) -> Self {
+        Self {
+            identity,
+            bootstrap_origin,
+            endpoint_ticket,
+            entry_path,
+        }
+    }
 }
 
 impl SiteProtocol {
-    pub fn new(registry: CapabilityRegistry, site: StaticSite) -> Self {
+    pub fn new(registry: CapabilityRegistry, site: StaticSite, issuer: SessionGrantIssuer) -> Self {
         Self {
             registry,
             source: SiteSource::Static(site),
+            issuer,
         }
     }
 
-    pub fn loopback(registry: CapabilityRegistry, site: LoopbackSite) -> Self {
+    pub fn loopback(
+        registry: CapabilityRegistry,
+        site: LoopbackSite,
+        issuer: SessionGrantIssuer,
+    ) -> Self {
         Self {
             registry,
             source: SiteSource::Loopback(site),
+            issuer,
         }
     }
 }
@@ -489,16 +622,61 @@ impl SiteProtocol {
             .accept_bi()
             .await
             .context("accept authorization stream")?;
-        let hello: ClientHello = read_frame(&mut hello_recv)
+        let hello: ClientAuthV4 = read_frame(&mut hello_recv)
             .await
             .context("read client authorization")?;
         let now = unix_now();
-        let authorization = self.registry.authorize(&hello, connection.remote_id(), now);
+        let pending = match self.prepare_authorization(hello, now) {
+            Ok(pending) => pending,
+            Err(code) => {
+                write_frame(&mut hello_send, &ServerAuthV4::Denied { code })
+                    .await
+                    .context("write authorization denial")?;
+                hello_send.finish().context("finish authorization denial")?;
+                let _ = tokio::time::timeout(Duration::from_secs(1), hello_send.stopped()).await;
+                return Ok(());
+            }
+        };
+        let challenge = SessionChallengeV4 {
+            challenge_id: Uuid::new_v4(),
+            session_id: pending.session_id(),
+            nonce: rand::rng().random(),
+            expires_at_unix: now.saturating_add(SESSION_CHALLENGE_TTL_SECONDS),
+        };
+        write_frame(&mut hello_send, &ServerAuthV4::Challenge(challenge.clone()))
+            .await
+            .context("write session challenge")?;
+        let proof: ClientProofV4 = read_frame(&mut hello_recv)
+            .await
+            .context("read session proof")?;
+        let proof_payload = pending.proof_payload(&self.issuer, &connection, &challenge);
+        let proof_valid = verify_session_proof(
+            pending.session_public_key(),
+            &proof_payload,
+            &proof.signature,
+            unix_now(),
+        )
+        .is_ok();
+        let authorization = if proof_valid {
+            pending.finalize(&self.registry, connection.remote_id(), unix_now())
+        } else {
+            Err(DenialCode::Invalid)
+        };
+        let mut granted_session = None;
         let reply = match authorization {
-            Ok(session) => ServerHello::Granted {
-                expires_at_unix: session.invite_expires_at_unix(),
+            Ok(session) => match self.issue_grant(&pending, unix_now()) {
+                Ok(session_grant) => {
+                    granted_session = Some(session);
+                    ServerHelloV4::Granted { session_grant }
+                }
+                Err(_) => {
+                    self.registry.kick(session.session_id());
+                    ServerHelloV4::Denied {
+                        code: DenialCode::Invalid,
+                    }
+                }
             },
-            Err(code) => ServerHello::Denied { code },
+            Err(code) => ServerHelloV4::Denied { code },
         };
         write_frame(&mut hello_send, &reply)
             .await
@@ -506,7 +684,8 @@ impl SiteProtocol {
         hello_send
             .finish()
             .context("finish authorization response")?;
-        let Ok(session) = authorization else {
+        let Some(session) = granted_session else {
+            let _ = tokio::time::timeout(Duration::from_secs(1), hello_send.stopped()).await;
             return Ok(());
         };
 
@@ -529,6 +708,166 @@ impl SiteProtocol {
         }
         self.registry.session_disconnected(session, stable_id);
         Ok(())
+    }
+
+    fn prepare_authorization(
+        &self,
+        hello: ClientAuthV4,
+        now_unix: i64,
+    ) -> Result<PendingAuthorization, DenialCode> {
+        match hello {
+            ClientAuthV4::Admit {
+                invite_id,
+                capability,
+                session_public_key,
+            } => {
+                iroh::PublicKey::from_bytes(&session_public_key)
+                    .map_err(|_| DenialCode::Invalid)?;
+                self.registry.can_admit(invite_id, &capability, now_unix)?;
+                Ok(PendingAuthorization::Admit {
+                    invite_id,
+                    capability,
+                    session_id: Uuid::new_v4(),
+                    session_public_key,
+                })
+            }
+            ClientAuthV4::Resume { session_grant } => {
+                let grant = verify_session_grant(&session_grant, now_unix)
+                    .map_err(|_| DenialCode::Invalid)?;
+                if grant.host_id != *self.issuer.identity.public().as_bytes()
+                    || grant.bootstrap_origin != self.issuer.bootstrap_origin
+                    || grant.endpoint_ticket != self.issuer.endpoint_ticket
+                    || grant.entry_path != self.issuer.entry_path
+                {
+                    return Err(DenialCode::Invalid);
+                }
+                self.registry.can_resume(&grant)?;
+                Ok(PendingAuthorization::Resume {
+                    session_grant,
+                    grant,
+                })
+            }
+        }
+    }
+
+    fn issue_grant(
+        &self,
+        pending: &PendingAuthorization,
+        now_unix: i64,
+    ) -> Result<String, urspace_protocol::SessionGrantError> {
+        sign_session_grant(
+            &self.issuer.identity,
+            SessionGrantIssue {
+                bootstrap_origin: self.issuer.bootstrap_origin.clone(),
+                endpoint_ticket: self.issuer.endpoint_ticket.clone(),
+                invite_id: pending.invite_id(),
+                session_id: pending.session_id(),
+                session_public_key: *pending.session_public_key(),
+                issued_at_unix: now_unix,
+                // Browser grants remain valid for the lifetime of this in-memory host
+                // session. Kick, invite revocation, and host restart are authoritative.
+                expires_at_unix: SESSION_GRANT_EXPIRY_UNIX,
+                authorization_epoch: pending.authorization_epoch(),
+                entry_path: self.issuer.entry_path.clone(),
+            },
+        )
+    }
+}
+
+#[derive(Debug)]
+enum PendingAuthorization {
+    Admit {
+        invite_id: Uuid,
+        capability: [u8; 32],
+        session_id: Uuid,
+        session_public_key: [u8; 32],
+    },
+    Resume {
+        session_grant: String,
+        grant: SessionGrantPayload,
+    },
+}
+
+impl PendingAuthorization {
+    fn session_id(&self) -> Uuid {
+        match self {
+            Self::Admit { session_id, .. } => *session_id,
+            Self::Resume { grant, .. } => grant.session_id,
+        }
+    }
+
+    fn invite_id(&self) -> Uuid {
+        match self {
+            Self::Admit { invite_id, .. } => *invite_id,
+            Self::Resume { grant, .. } => grant.invite_id,
+        }
+    }
+
+    fn session_public_key(&self) -> &[u8; 32] {
+        match self {
+            Self::Admit {
+                session_public_key, ..
+            } => session_public_key,
+            Self::Resume { grant, .. } => &grant.session_public_key,
+        }
+    }
+
+    fn authorization_epoch(&self) -> u64 {
+        match self {
+            Self::Admit { .. } => 0,
+            Self::Resume { grant, .. } => grant.authorization_epoch,
+        }
+    }
+
+    fn proof_payload(
+        &self,
+        issuer: &SessionGrantIssuer,
+        connection: &Connection,
+        challenge: &SessionChallengeV4,
+    ) -> SessionProofPayload {
+        SessionProofPayload {
+            version: urspace_protocol::SESSION_PROOF_VERSION,
+            purpose: match self {
+                Self::Admit { .. } => SessionProofPurpose::Admit,
+                Self::Resume { .. } => SessionProofPurpose::Resume,
+            },
+            host_id: *issuer.identity.public().as_bytes(),
+            site_id: issuer.identity.public().to_z32(),
+            alpn: ALPN.to_vec(),
+            session_id: challenge.session_id,
+            session_grant_hash: match self {
+                Self::Admit { .. } => [0_u8; 32],
+                Self::Resume { session_grant, .. } => session_grant_hash(session_grant),
+            },
+            endpoint_id: *connection.remote_id().as_bytes(),
+            challenge_id: challenge.challenge_id,
+            nonce: challenge.nonce,
+            expires_at_unix: challenge.expires_at_unix,
+        }
+    }
+
+    fn finalize(
+        &self,
+        registry: &CapabilityRegistry,
+        endpoint_id: EndpointId,
+        now_unix: i64,
+    ) -> Result<AuthorizedSession, DenialCode> {
+        match self {
+            Self::Admit {
+                invite_id,
+                capability,
+                session_id,
+                session_public_key,
+            } => registry.admit(
+                *invite_id,
+                capability,
+                *session_id,
+                *session_public_key,
+                endpoint_id,
+                now_unix,
+            ),
+            Self::Resume { grant, .. } => registry.resume(grant, endpoint_id),
+        }
     }
 }
 
@@ -820,91 +1159,213 @@ mod tests {
     use std::time::Duration;
 
     use iroh::{Endpoint, SecretKey, endpoint::presets, protocol::Router};
-    use urspace_protocol::{ALPN, ServerHello};
+    use iroh_tickets::endpoint::EndpointTicket;
+    use urspace_protocol::{
+        ALPN, ClientAuthV4, ClientProofV4, SESSION_PROOF_VERSION, ServerAuthV4, ServerHelloV4,
+        SessionGrantPayload, SessionProofPayload, SessionProofPurpose, sign_session_proof,
+        verify_session_grant,
+    };
 
-    fn hello(id: Uuid, capability: [u8; 32]) -> ClientHello {
-        ClientHello {
-            version: urspace_protocol::INVITE_VERSION,
-            invite_id: id,
-            capability,
+    fn grant(
+        host: &SecretKey,
+        invite_id: Uuid,
+        session_id: Uuid,
+        session_public_key: [u8; 32],
+    ) -> SessionGrantPayload {
+        SessionGrantPayload {
+            version: urspace_protocol::SESSION_GRANT_VERSION,
+            host_id: *host.public().as_bytes(),
+            site_id: host.public().to_z32(),
+            bootstrap_origin: "https://sites.example".into(),
+            endpoint_ticket: EndpointTicket::new(iroh::EndpointAddr::new(host.public()))
+                .to_string(),
+            invite_id,
+            session_id,
+            session_public_key,
+            issued_at_unix: 100,
+            expires_at_unix: 1_000,
+            authorization_epoch: 0,
+            entry_path: "/".into(),
         }
+    }
+
+    async fn authorize_v4(
+        connection: &Connection,
+        endpoint_id: EndpointId,
+        host: &SecretKey,
+        session_key: &SecretKey,
+        auth: ClientAuthV4,
+        resume_grant: Option<&str>,
+    ) -> String {
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        write_frame(&mut send, &auth).await.unwrap();
+        let ServerAuthV4::Challenge(challenge) = read_frame(&mut recv).await.unwrap() else {
+            panic!("host denied valid authorization");
+        };
+        let proof = SessionProofPayload {
+            version: SESSION_PROOF_VERSION,
+            purpose: if resume_grant.is_some() {
+                SessionProofPurpose::Resume
+            } else {
+                SessionProofPurpose::Admit
+            },
+            host_id: *host.public().as_bytes(),
+            site_id: host.public().to_z32(),
+            alpn: ALPN.to_vec(),
+            session_id: challenge.session_id,
+            session_grant_hash: resume_grant.map(session_grant_hash).unwrap_or([0_u8; 32]),
+            endpoint_id: *endpoint_id.as_bytes(),
+            challenge_id: challenge.challenge_id,
+            nonce: challenge.nonce,
+            expires_at_unix: challenge.expires_at_unix,
+        };
+        write_frame(
+            &mut send,
+            &ClientProofV4 {
+                signature: sign_session_proof(session_key, &proof).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        send.finish().unwrap();
+        let ServerHelloV4::Granted { session_grant } = read_frame(&mut recv).await.unwrap() else {
+            panic!("host rejected valid session proof");
+        };
+        session_grant
     }
 
     #[test]
     fn registry_enforces_admission_controls_without_expiring_active_sessions() {
         let registry = CapabilityRegistry::default();
         let id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
         let capability = [9_u8; 32];
+        let host = SecretKey::generate();
+        let session_key = SecretKey::generate();
         let endpoint_a = SecretKey::generate().public();
         let endpoint_b = SecretKey::generate().public();
         registry.insert(id, &capability, 200, 1);
 
         assert_eq!(
-            registry.authorize(&hello(id, [8_u8; 32]), endpoint_a, 100),
+            registry.can_admit(id, &[8_u8; 32], 100),
             Err(DenialCode::Invalid)
         );
         let session = registry
-            .authorize(&hello(id, capability), endpoint_a, 100)
+            .admit(
+                id,
+                &capability,
+                session_id,
+                *session_key.public().as_bytes(),
+                endpoint_a,
+                100,
+            )
             .unwrap();
-        assert_eq!(session.invite_expires_at_unix(), 200);
         assert!(registry.session_is_active(session));
+        let issued = grant(&host, id, session_id, *session_key.public().as_bytes());
+        let resumed = registry.resume(&issued, endpoint_b).unwrap();
+        assert!(registry.session_is_active(resumed));
+        assert!(!registry.session_is_active(session));
         assert_eq!(
-            registry.authorize(&hello(id, capability), endpoint_a, 200),
-            Ok(session)
-        );
-        assert_eq!(
-            registry.authorize(&hello(id, capability), endpoint_b, 100),
+            registry.can_admit(id, &capability, 100),
             Err(DenialCode::SessionLimit)
         );
         assert_eq!(
-            registry.authorize(&hello(id, capability), endpoint_b, 200),
+            registry.can_admit(id, &capability, 200),
             Err(DenialCode::Expired)
         );
-        assert!(registry.session_is_active(session));
         assert!(registry.revoke(id));
-        assert!(!registry.session_is_active(session));
+        assert!(!registry.session_is_active(resumed));
 
         let revoked_id = Uuid::new_v4();
         registry.insert(revoked_id, &capability, 200, 2);
         assert!(registry.revoke(revoked_id));
         assert_eq!(
-            registry.authorize(&hello(revoked_id, capability), endpoint_a, 100),
+            registry.can_admit(revoked_id, &capability, 100),
             Err(DenialCode::Revoked)
         );
 
         let expired_id = Uuid::new_v4();
         registry.insert(expired_id, &capability, 100, 1);
         assert_eq!(
-            registry.authorize(&hello(expired_id, capability), endpoint_a, 100),
+            registry.can_admit(expired_id, &capability, 100),
             Err(DenialCode::Expired)
         );
+    }
+
+    #[test]
+    fn concurrent_admission_cannot_oversubscribe_the_final_slot() {
+        let registry = CapabilityRegistry::default();
+        let invite_id = Uuid::new_v4();
+        let capability = [14_u8; 32];
+        registry.insert(invite_id, &capability, 200, 1);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let attempts = [0_u8, 1_u8].map(|seed| {
+            let registry = registry.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let session_key = SecretKey::generate();
+                let endpoint = SecretKey::generate().public();
+                let session_id = Uuid::from_u128(100 + u128::from(seed));
+                barrier.wait();
+                registry.admit(
+                    invite_id,
+                    &capability,
+                    session_id,
+                    *session_key.public().as_bytes(),
+                    endpoint,
+                    100,
+                )
+            })
+        });
+        barrier.wait();
+        let results = attempts.map(|attempt| attempt.join().unwrap());
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(DenialCode::SessionLimit)))
+                .count(),
+            1
+        );
+        assert_eq!(registry.sessions().len(), 1);
     }
 
     #[test]
     fn rotation_preserves_admitted_sessions_and_closes_new_admissions() {
         let registry = CapabilityRegistry::default();
         let id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
         let capability = [10_u8; 32];
+        let host = SecretKey::generate();
+        let session_key = SecretKey::generate();
         let endpoint_a = SecretKey::generate().public();
         let endpoint_b = SecretKey::generate().public();
         registry.insert(id, &capability, 200, 2);
 
-        let session = registry
-            .authorize(&hello(id, capability), endpoint_a, 100)
+        registry
+            .admit(
+                id,
+                &capability,
+                session_id,
+                *session_key.public().as_bytes(),
+                endpoint_a,
+                100,
+            )
             .unwrap();
         assert!(registry.close_admissions(id));
+        let issued = grant(&host, id, session_id, *session_key.public().as_bytes());
+        assert!(registry.resume(&issued, endpoint_b).is_ok());
         assert_eq!(
-            registry.authorize(&hello(id, capability), endpoint_a, 250),
-            Ok(session)
-        );
-        assert_eq!(
-            registry.authorize(&hello(id, capability), endpoint_b, 100),
+            registry.can_admit(id, &capability, 100),
             Err(DenialCode::Revoked)
         );
         assert_eq!(
             registry.sessions(),
             vec![SessionInfo {
-                endpoint_id: endpoint_a,
+                session_id,
+                endpoint_id: endpoint_b,
                 connected: false,
             }]
         );
@@ -915,26 +1376,47 @@ mod tests {
         let registry = CapabilityRegistry::default();
         let id = Uuid::new_v4();
         let capability = [12_u8; 32];
+        let host = SecretKey::generate();
+        let session_a = SecretKey::generate();
+        let session_b = SecretKey::generate();
+        let session_a_id = Uuid::new_v4();
+        let session_b_id = Uuid::new_v4();
         let endpoint_a = SecretKey::generate().public();
         let endpoint_b = SecretKey::generate().public();
         registry.insert(id, &capability, 200, 2);
 
         registry
-            .authorize(&hello(id, capability), endpoint_a, 100)
+            .admit(
+                id,
+                &capability,
+                session_a_id,
+                *session_a.public().as_bytes(),
+                endpoint_a,
+                100,
+            )
             .unwrap();
         registry
-            .authorize(&hello(id, capability), endpoint_b, 100)
+            .admit(
+                id,
+                &capability,
+                session_b_id,
+                *session_b.public().as_bytes(),
+                endpoint_b,
+                100,
+            )
             .unwrap();
-        assert!(registry.kick(endpoint_a));
+        assert!(registry.kick(session_a_id));
+        let issued = grant(&host, id, session_a_id, *session_a.public().as_bytes());
         assert_eq!(
-            registry.authorize(&hello(id, capability), endpoint_a, 100),
+            registry.resume(&issued, endpoint_a),
             Err(DenialCode::Revoked)
         );
         assert_eq!(registry.sessions().len(), 1);
         assert_eq!(registry.kick_all(), 1);
         assert!(registry.sessions().is_empty());
+        let issued = grant(&host, id, session_b_id, *session_b.public().as_bytes());
         assert_eq!(
-            registry.authorize(&hello(id, capability), endpoint_b, 100),
+            registry.resume(&issued, endpoint_b),
             Err(DenialCode::Revoked)
         );
     }
@@ -1012,26 +1494,66 @@ mod tests {
 
         let identity = SecretKey::generate();
         let server = Endpoint::builder(presets::Minimal)
-            .secret_key(identity)
+            .secret_key(identity.clone())
             .bind()
             .await
             .unwrap();
         let server_addr = server.addr();
+        let endpoint_ticket = EndpointTicket::new(server_addr.clone()).to_string();
+        let issuer = SessionGrantIssuer::new(
+            identity.clone(),
+            "https://sites.example".into(),
+            endpoint_ticket,
+            "/".into(),
+        );
         let router = Router::builder(server)
-            .accept(ALPN, SiteProtocol::new(registry.clone(), site))
+            .accept(ALPN, SiteProtocol::new(registry.clone(), site, issuer))
             .spawn();
         let client = Endpoint::bind(presets::Minimal).await.unwrap();
         let connection = client.connect(server_addr, ALPN).await.unwrap();
+        let session_key = SecretKey::generate();
 
         let (mut hello_send, mut hello_recv) = connection.open_bi().await.unwrap();
-        write_frame(&mut hello_send, &hello(invite_id, capability))
-            .await
-            .unwrap();
+        write_frame(
+            &mut hello_send,
+            &ClientAuthV4::Admit {
+                invite_id,
+                capability,
+                session_public_key: *session_key.public().as_bytes(),
+            },
+        )
+        .await
+        .unwrap();
+        let ServerAuthV4::Challenge(challenge) = read_frame(&mut hello_recv).await.unwrap() else {
+            panic!("host denied valid admission");
+        };
+        let proof = SessionProofPayload {
+            version: SESSION_PROOF_VERSION,
+            purpose: SessionProofPurpose::Admit,
+            host_id: *identity.public().as_bytes(),
+            site_id: identity.public().to_z32(),
+            alpn: ALPN.to_vec(),
+            session_id: challenge.session_id,
+            session_grant_hash: [0_u8; 32],
+            endpoint_id: *client.id().as_bytes(),
+            challenge_id: challenge.challenge_id,
+            nonce: challenge.nonce,
+            expires_at_unix: challenge.expires_at_unix,
+        };
+        write_frame(
+            &mut hello_send,
+            &ClientProofV4 {
+                signature: sign_session_proof(&session_key, &proof).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
         hello_send.finish().unwrap();
-        assert!(matches!(
-            read_frame::<_, ServerHello>(&mut hello_recv).await.unwrap(),
-            ServerHello::Granted { .. }
-        ));
+        let ServerHelloV4::Granted { session_grant } = read_frame(&mut hello_recv).await.unwrap()
+        else {
+            panic!("host rejected valid session proof");
+        };
+        let admitted = verify_session_grant(&session_grant, unix_now()).unwrap();
 
         let (mut request_send, mut response_recv) = connection.open_bi().await.unwrap();
         write_frame(
@@ -1055,16 +1577,119 @@ mod tests {
         assert_eq!(
             registry.sessions(),
             vec![SessionInfo {
+                session_id: admitted.session_id,
                 endpoint_id: client.id(),
                 connected: true,
             }]
         );
-        assert!(registry.kick(client.id()));
+        assert!(registry.kick(admitted.session_id));
         tokio::time::timeout(Duration::from_secs(2), connection.closed())
             .await
             .unwrap();
 
         client.close().await;
+        router.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn grant_reconnects_from_a_fresh_endpoint_and_kick_still_wins() {
+        let root = tempfile::tempdir().unwrap();
+        tokio::fs::write(root.path().join("index.html"), "mesh resumes")
+            .await
+            .unwrap();
+        let site = StaticSite::open(root.path()).await.unwrap();
+        let registry = CapabilityRegistry::default();
+        let invite_id = Uuid::new_v4();
+        let capability = [13_u8; 32];
+        registry.insert(invite_id, &capability, unix_now() + 60, 1);
+
+        let identity = SecretKey::generate();
+        let server = Endpoint::builder(presets::Minimal)
+            .secret_key(identity.clone())
+            .bind()
+            .await
+            .unwrap();
+        let server_addr = server.addr();
+        let issuer = SessionGrantIssuer::new(
+            identity.clone(),
+            "https://sites.example".into(),
+            EndpointTicket::new(server_addr.clone()).to_string(),
+            "/".into(),
+        );
+        let router = Router::builder(server)
+            .accept(ALPN, SiteProtocol::new(registry.clone(), site, issuer))
+            .spawn();
+
+        let session_key = SecretKey::generate();
+        let first = Endpoint::bind(presets::Minimal).await.unwrap();
+        let first_connection = first.connect(server_addr.clone(), ALPN).await.unwrap();
+        let first_grant = authorize_v4(
+            &first_connection,
+            first.id(),
+            &identity,
+            &session_key,
+            ClientAuthV4::Admit {
+                invite_id,
+                capability,
+                session_public_key: *session_key.public().as_bytes(),
+            },
+            None,
+        )
+        .await;
+        let admitted = verify_session_grant(&first_grant, unix_now()).unwrap();
+
+        let second = Endpoint::bind(presets::Minimal).await.unwrap();
+        let second_connection = second.connect(server_addr.clone(), ALPN).await.unwrap();
+        let rotated_grant = authorize_v4(
+            &second_connection,
+            second.id(),
+            &identity,
+            &session_key,
+            ClientAuthV4::Resume {
+                session_grant: first_grant.clone(),
+            },
+            Some(&first_grant),
+        )
+        .await;
+        assert_eq!(
+            verify_session_grant(&rotated_grant, unix_now())
+                .unwrap()
+                .session_id,
+            admitted.session_id
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(registry.sessions().len(), 1);
+        assert_eq!(registry.sessions()[0].endpoint_id, second.id());
+        tokio::time::timeout(Duration::from_secs(2), first_connection.closed())
+            .await
+            .unwrap();
+
+        assert!(registry.kick(admitted.session_id));
+        tokio::time::timeout(Duration::from_secs(2), second_connection.closed())
+            .await
+            .unwrap();
+
+        let third = Endpoint::bind(presets::Minimal).await.unwrap();
+        let third_connection = third.connect(server_addr, ALPN).await.unwrap();
+        let (mut send, mut recv) = third_connection.open_bi().await.unwrap();
+        write_frame(
+            &mut send,
+            &ClientAuthV4::Resume {
+                session_grant: rotated_grant,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            read_frame::<_, ServerAuthV4>(&mut recv).await.unwrap(),
+            ServerAuthV4::Denied {
+                code: DenialCode::Revoked
+            }
+        ));
+
+        first.close().await;
+        second.close().await;
+        third.close().await;
         router.shutdown().await.unwrap();
     }
 }

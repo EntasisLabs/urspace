@@ -11,8 +11,11 @@ use iroh_tickets::endpoint::EndpointTicket;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use urspace_protocol::{
-    ClientHello, Header, RequestMethod, ServerHello, SiteRequest, SiteResponseHead, SocketMessage,
-    alpn_for_invite, read_frame, verify_invite_url, verify_invite_url_for_resume, write_frame,
+    ClientAuthV4, ClientHello, ClientProofV4, Header, INVITE_VERSION, RequestMethod,
+    SESSION_PROOF_VERSION, ServerAuthV4, ServerHello, ServerHelloV4, SessionGrantPayload,
+    SessionProofPayload, SessionProofPurpose, SiteRequest, SiteResponseHead, SocketMessage,
+    alpn_for_invite, read_frame, session_grant_hash, session_grant_origin, sign_session_proof,
+    verify_invite_url, verify_invite_url_for_resume, verify_session_grant, write_frame,
 };
 use uuid::Uuid;
 use wasm_bindgen::{JsError, JsValue, prelude::wasm_bindgen};
@@ -41,12 +44,22 @@ pub struct SiteClient {
     endpoint: Endpoint,
     endpoint_addr: EndpointAddr,
     connection: Mutex<iroh::endpoint::Connection>,
-    invite_id: Uuid,
-    invite_version: u8,
-    capability: Zeroizing<[u8; 32]>,
+    authorization: SessionAuthorization,
     closed: AtomicBool,
     entry_path: String,
     site_id: String,
+}
+
+enum SessionAuthorization {
+    Legacy {
+        invite_id: Uuid,
+        invite_version: u8,
+        capability: Zeroizing<[u8; 32]>,
+    },
+    Grant {
+        session_grant: String,
+        session_key: Zeroizing<[u8; 32]>,
+    },
 }
 
 #[wasm_bindgen]
@@ -58,31 +71,61 @@ impl SiteClient {
             return Err(JsError::new("browser clock is outside the supported range"));
         }
         let now_unix = now_unix.floor() as i64;
-        Self::establish(invitation_url, Some(now_unix), iroh::SecretKey::generate()).await
+        Self::establish_invite(invitation_url, now_unix).await
     }
 
     #[wasm_bindgen(js_name = resume)]
     pub async fn resume(
-        mut invitation_url: String,
-        mut endpoint_secret: Vec<u8>,
+        mut resume_credential: String,
+        mut session_secret: Vec<u8>,
+        now_unix: f64,
+        mut expected_origin: String,
     ) -> Result<Self, JsError> {
-        let key_bytes: [u8; 32] = match endpoint_secret.as_slice().try_into() {
+        if !now_unix.is_finite() || now_unix < 0.0 || now_unix > i64::MAX as f64 {
+            resume_credential.zeroize();
+            session_secret.zeroize();
+            expected_origin.zeroize();
+            return Err(JsError::new("browser clock is outside the supported range"));
+        }
+        let key_bytes: [u8; 32] = match session_secret.as_slice().try_into() {
             Ok(bytes) => bytes,
             Err(_) => {
-                invitation_url.zeroize();
-                endpoint_secret.zeroize();
+                resume_credential.zeroize();
+                session_secret.zeroize();
+                expected_origin.zeroize();
                 return Err(JsError::new("browser resume identity is invalid"));
             }
         };
-        endpoint_secret.zeroize();
+        session_secret.zeroize();
         let key_bytes = Zeroizing::new(key_bytes);
-        let endpoint_secret = iroh::SecretKey::from_bytes(&key_bytes);
-        Self::establish(invitation_url, None, endpoint_secret).await
+        let now_unix = now_unix.floor() as i64;
+        if resume_credential.starts_with("usg1.") {
+            let result =
+                Self::establish_grant(resume_credential, key_bytes, now_unix, &expected_origin)
+                    .await;
+            expected_origin.zeroize();
+            result
+        } else {
+            expected_origin.zeroize();
+            let endpoint_secret = iroh::SecretKey::from_bytes(&key_bytes);
+            Self::establish_legacy_resume(resume_credential, endpoint_secret).await
+        }
     }
 
     #[wasm_bindgen(js_name = exportResumeKey)]
     pub fn export_resume_key(&self) -> Vec<u8> {
-        self.endpoint.secret_key().to_bytes().to_vec()
+        match &self.authorization {
+            SessionAuthorization::Legacy { .. } => self.endpoint.secret_key().to_bytes().to_vec(),
+            SessionAuthorization::Grant { session_key, .. } => session_key.to_vec(),
+        }
+    }
+
+    #[wasm_bindgen(getter, js_name = resumeCredential)]
+    pub fn resume_credential(&self) -> String {
+        match &self.authorization {
+            SessionAuthorization::Legacy { .. } => String::new(),
+            SessionAuthorization::Grant { session_grant, .. } => session_grant.clone(),
+        }
     }
 
     #[wasm_bindgen(getter, js_name = entryPath)]
@@ -182,16 +225,8 @@ impl SiteClient {
 }
 
 impl SiteClient {
-    async fn establish(
-        mut invitation_url: String,
-        now_unix: Option<i64>,
-        endpoint_secret: iroh::SecretKey,
-    ) -> Result<Self, JsError> {
-        let verified = match now_unix {
-            Some(now_unix) => verify_invite_url(&invitation_url, now_unix),
-            None => verify_invite_url_for_resume(&invitation_url),
-        };
-        let mut invite = match verified {
+    async fn establish_invite(mut invitation_url: String, now_unix: i64) -> Result<Self, JsError> {
+        let mut invite = match verify_invite_url(&invitation_url, now_unix) {
             Ok(invite) => invite,
             Err(error) => {
                 invitation_url.zeroize();
@@ -200,22 +235,76 @@ impl SiteClient {
         };
         invitation_url.zeroize();
 
-        let capability = Zeroizing::new(std::mem::take(&mut invite.capability));
-        let ticket = EndpointTicket::from_str(&invite.endpoint_ticket)
-            .map_err(|error| JsError::new(&format!("invalid endpoint ticket: {error}")))?;
-        let endpoint_addr = normalize_relay_hosts(ticket.endpoint_addr())
-            .map_err(|error| JsError::new(&format!("invalid relay address: {error}")))?;
-        let relay_urls: Vec<_> = endpoint_addr.relay_urls().cloned().collect();
-        if relay_urls.is_empty() {
-            return Err(JsError::new("invitation does not contain a browser relay"));
+        if invite.version != INVITE_VERSION {
+            return Self::establish_legacy(invite, iroh::SecretKey::generate()).await;
         }
-        let endpoint = Endpoint::builder(presets::N0)
-            .secret_key(endpoint_secret)
-            .relay_mode(RelayMode::custom(relay_urls))
-            .bind()
-            .await
-            .map_err(|error| JsError::new(&format!("could not start Iroh: {error}")))?;
-        let connection = match connect_and_authorize(
+
+        let capability = Zeroizing::new(std::mem::take(&mut invite.capability));
+        let endpoint_addr = endpoint_addr_from_ticket(&invite.endpoint_ticket)?;
+        let endpoint = bind_browser_endpoint(&endpoint_addr, iroh::SecretKey::generate()).await?;
+        let session_secret = iroh::SecretKey::generate();
+        let auth = ClientAuthV4::Admit {
+            invite_id: invite.invite_id,
+            capability: *capability,
+            session_public_key: *session_secret.public().as_bytes(),
+        };
+        let authorized = connect_and_authorize_v4(
+            &endpoint,
+            &endpoint_addr,
+            auth,
+            &session_secret,
+            None,
+            now_unix,
+        )
+        .await;
+        let (connection, session_grant, grant) = match authorized {
+            Ok(authorized) => authorized,
+            Err(error) => {
+                endpoint.close().await;
+                return Err(error);
+            }
+        };
+
+        Ok(Self {
+            endpoint,
+            endpoint_addr,
+            connection: Mutex::new(connection),
+            authorization: SessionAuthorization::Grant {
+                session_grant,
+                session_key: Zeroizing::new(session_secret.to_bytes()),
+            },
+            closed: AtomicBool::new(false),
+            entry_path: grant.entry_path,
+            site_id: grant.site_id,
+        })
+    }
+
+    async fn establish_legacy_resume(
+        mut invitation_url: String,
+        endpoint_secret: iroh::SecretKey,
+    ) -> Result<Self, JsError> {
+        let invite = match verify_invite_url_for_resume(&invitation_url) {
+            Ok(invite) => invite,
+            Err(error) => {
+                invitation_url.zeroize();
+                return Err(JsError::new(&format!("invitation rejected: {error}")));
+            }
+        };
+        invitation_url.zeroize();
+        if invite.version == INVITE_VERSION {
+            return Err(JsError::new("a v4 session grant is required to reconnect"));
+        }
+        Self::establish_legacy(invite, endpoint_secret).await
+    }
+
+    async fn establish_legacy(
+        mut invite: urspace_protocol::InvitePayload,
+        endpoint_secret: iroh::SecretKey,
+    ) -> Result<Self, JsError> {
+        let capability = Zeroizing::new(std::mem::take(&mut invite.capability));
+        let endpoint_addr = endpoint_addr_from_ticket(&invite.endpoint_ticket)?;
+        let endpoint = bind_browser_endpoint(&endpoint_addr, endpoint_secret).await?;
+        let connection = match connect_and_authorize_legacy(
             &endpoint,
             &endpoint_addr,
             invite.version,
@@ -230,17 +319,70 @@ impl SiteClient {
                 return Err(error);
             }
         };
-
         Ok(Self {
             endpoint,
             endpoint_addr,
             connection: Mutex::new(connection),
-            invite_id: invite.invite_id,
-            invite_version: invite.version,
-            capability,
+            authorization: SessionAuthorization::Legacy {
+                invite_id: invite.invite_id,
+                invite_version: invite.version,
+                capability,
+            },
             closed: AtomicBool::new(false),
             entry_path: invite.entry_path,
             site_id: invite.site_id,
+        })
+    }
+
+    async fn establish_grant(
+        session_grant: String,
+        session_key: Zeroizing<[u8; 32]>,
+        now_unix: i64,
+        expected_origin: &str,
+    ) -> Result<Self, JsError> {
+        let grant = verify_session_grant(&session_grant, now_unix)
+            .map_err(|error| JsError::new(&format!("session grant rejected: {error}")))?;
+        if session_grant_origin(&grant)
+            .map_err(|error| JsError::new(&format!("session grant rejected: {error}")))?
+            != expected_origin
+        {
+            return Err(JsError::new("session grant belongs to another site origin"));
+        }
+        let session_secret = iroh::SecretKey::from_bytes(&session_key);
+        if grant.session_public_key != *session_secret.public().as_bytes() {
+            return Err(JsError::new("browser resume identity is invalid"));
+        }
+        let endpoint_addr = endpoint_addr_from_ticket(&grant.endpoint_ticket)?;
+        let endpoint = bind_browser_endpoint(&endpoint_addr, iroh::SecretKey::generate()).await?;
+        let authorized = connect_and_authorize_v4(
+            &endpoint,
+            &endpoint_addr,
+            ClientAuthV4::Resume {
+                session_grant: session_grant.clone(),
+            },
+            &session_secret,
+            Some((&session_grant, &grant)),
+            now_unix,
+        )
+        .await;
+        let (connection, rotated_grant, rotated) = match authorized {
+            Ok(authorized) => authorized,
+            Err(error) => {
+                endpoint.close().await;
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            endpoint,
+            endpoint_addr,
+            connection: Mutex::new(connection),
+            authorization: SessionAuthorization::Grant {
+                session_grant: rotated_grant,
+                session_key,
+            },
+            closed: AtomicBool::new(false),
+            entry_path: rotated.entry_path,
+            site_id: rotated.site_id,
         })
     }
 
@@ -262,14 +404,42 @@ impl SiteClient {
         {
             return Ok(stream);
         }
-        let replacement = connect_and_authorize(
-            &self.endpoint,
-            &self.endpoint_addr,
-            self.invite_version,
-            self.invite_id,
-            &self.capability,
-        )
-        .await?;
+        let replacement = match &self.authorization {
+            SessionAuthorization::Legacy {
+                invite_id,
+                invite_version,
+                capability,
+            } => {
+                connect_and_authorize_legacy(
+                    &self.endpoint,
+                    &self.endpoint_addr,
+                    *invite_version,
+                    *invite_id,
+                    capability,
+                )
+                .await?
+            }
+            SessionAuthorization::Grant {
+                session_grant,
+                session_key,
+            } => {
+                let grant = verify_session_grant(session_grant, 0)
+                    .map_err(|error| JsError::new(&format!("session grant rejected: {error}")))?;
+                let session_secret = iroh::SecretKey::from_bytes(session_key);
+                let (connection, _, _) = connect_and_authorize_v4(
+                    &self.endpoint,
+                    &self.endpoint_addr,
+                    ClientAuthV4::Resume {
+                        session_grant: session_grant.clone(),
+                    },
+                    &session_secret,
+                    Some((session_grant, &grant)),
+                    0,
+                )
+                .await?;
+                connection
+            }
+        };
         if self.closed.load(Ordering::Acquire) {
             replacement.close(0_u8.into(), b"browser closed");
             return Err(JsError::new("browser session is closed"));
@@ -282,7 +452,157 @@ impl SiteClient {
     }
 }
 
-async fn connect_and_authorize(
+fn endpoint_addr_from_ticket(raw: &str) -> Result<EndpointAddr, JsError> {
+    let ticket = EndpointTicket::from_str(raw)
+        .map_err(|error| JsError::new(&format!("invalid endpoint ticket: {error}")))?;
+    normalize_relay_hosts(ticket.endpoint_addr())
+        .map_err(|error| JsError::new(&format!("invalid relay address: {error}")))
+}
+
+async fn bind_browser_endpoint(
+    endpoint_addr: &EndpointAddr,
+    endpoint_secret: iroh::SecretKey,
+) -> Result<Endpoint, JsError> {
+    let relay_urls: Vec<_> = endpoint_addr.relay_urls().cloned().collect();
+    if relay_urls.is_empty() {
+        return Err(JsError::new("invitation does not contain a browser relay"));
+    }
+    Endpoint::builder(presets::N0)
+        .secret_key(endpoint_secret)
+        .relay_mode(RelayMode::custom(relay_urls))
+        .bind()
+        .await
+        .map_err(|error| JsError::new(&format!("could not start Iroh: {error}")))
+}
+
+async fn connect_transport(
+    endpoint: &Endpoint,
+    endpoint_addr: &EndpointAddr,
+    alpn: &'static [u8],
+) -> Result<iroh::endpoint::Connection, JsError> {
+    match n0_future::time::timeout(
+        SITE_CONNECT_TIMEOUT,
+        endpoint.connect(endpoint_addr.clone(), alpn),
+    )
+    .await
+    {
+        Ok(Ok(connection)) => Ok(connection),
+        Ok(Err(error)) => Err(JsError::new(&format!("could not reach site: {error}"))),
+        Err(_) => Err(JsError::new(
+            "Iroh relay connection timed out before the site could be reached",
+        )),
+    }
+}
+
+async fn connect_and_authorize_v4(
+    endpoint: &Endpoint,
+    endpoint_addr: &EndpointAddr,
+    auth: ClientAuthV4,
+    session_secret: &iroh::SecretKey,
+    resume: Option<(&str, &SessionGrantPayload)>,
+    now_unix: i64,
+) -> Result<(iroh::endpoint::Connection, String, SessionGrantPayload), JsError> {
+    let connection = connect_transport(endpoint, endpoint_addr, urspace_protocol::ALPN).await?;
+    let authorize = async {
+        let (mut send, mut recv) = connection
+            .open_bi()
+            .await
+            .map_err(|error| JsError::new(&format!("authorization stream failed: {error}")))?;
+        write_frame(&mut send, &auth)
+            .await
+            .map_err(|error| JsError::new(&format!("authorization request failed: {error}")))?;
+        let challenge = match read_frame(&mut recv)
+            .await
+            .map_err(|error| JsError::new(&format!("authorization challenge failed: {error}")))?
+        {
+            ServerAuthV4::Challenge(challenge) => challenge,
+            ServerAuthV4::Denied { code } => {
+                return Err(JsError::new(&format!(
+                    "site denied authorization: {code:?}"
+                )));
+            }
+        };
+        let (purpose, grant_hash, expected_invite) = match resume {
+            Some((session_grant, grant)) => {
+                if challenge.session_id != grant.session_id {
+                    return Err(JsError::new("site returned the wrong browser session"));
+                }
+                (
+                    SessionProofPurpose::Resume,
+                    session_grant_hash(session_grant),
+                    grant.invite_id,
+                )
+            }
+            None => {
+                let ClientAuthV4::Admit { invite_id, .. } = &auth else {
+                    return Err(JsError::new("browser authorization state is invalid"));
+                };
+                (SessionProofPurpose::Admit, [0_u8; 32], *invite_id)
+            }
+        };
+        let proof = SessionProofPayload {
+            version: SESSION_PROOF_VERSION,
+            purpose,
+            host_id: *endpoint_addr.id.as_bytes(),
+            site_id: endpoint_addr.id.to_z32(),
+            alpn: urspace_protocol::ALPN.to_vec(),
+            session_id: challenge.session_id,
+            session_grant_hash: grant_hash,
+            endpoint_id: *endpoint.id().as_bytes(),
+            challenge_id: challenge.challenge_id,
+            nonce: challenge.nonce,
+            expires_at_unix: challenge.expires_at_unix,
+        };
+        write_frame(
+            &mut send,
+            &ClientProofV4 {
+                signature: sign_session_proof(session_secret, &proof).map_err(|error| {
+                    JsError::new(&format!("could not sign session proof: {error}"))
+                })?,
+            },
+        )
+        .await
+        .map_err(|error| JsError::new(&format!("authorization proof failed: {error}")))?;
+        send.finish()
+            .map_err(|error| JsError::new(&format!("authorization request failed: {error}")))?;
+        let session_grant = match read_frame(&mut recv)
+            .await
+            .map_err(|error| JsError::new(&format!("authorization response failed: {error}")))?
+        {
+            ServerHelloV4::Granted { session_grant } => session_grant,
+            ServerHelloV4::Denied { code } => {
+                return Err(JsError::new(&format!(
+                    "site denied authorization: {code:?}"
+                )));
+            }
+        };
+        let grant = verify_session_grant(&session_grant, now_unix)
+            .map_err(|error| JsError::new(&format!("site returned an invalid grant: {error}")))?;
+        if grant.host_id != *endpoint_addr.id.as_bytes()
+            || grant.session_id != challenge.session_id
+            || grant.invite_id != expected_invite
+            || grant.session_public_key != *session_secret.public().as_bytes()
+        {
+            return Err(JsError::new("site returned a mismatched session grant"));
+        }
+        Ok((session_grant, grant))
+    };
+    let (session_grant, grant) =
+        match n0_future::time::timeout(SITE_AUTHORIZATION_TIMEOUT, authorize).await {
+            Ok(Ok(authorized)) => authorized,
+            Ok(Err(error)) => {
+                connection.close(0_u8.into(), b"authorization failed");
+                return Err(error);
+            }
+            Err(_) => {
+                connection.close(0_u8.into(), b"authorization timed out");
+                return Err(JsError::new("site authorization timed out"));
+            }
+        };
+    Ok((connection, session_grant, grant))
+}
+
+async fn connect_and_authorize_legacy(
     endpoint: &Endpoint,
     endpoint_addr: &EndpointAddr,
     invite_version: u8,

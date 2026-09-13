@@ -8,7 +8,7 @@ import {
   parseResumePayload,
 } from "/.urspace/assets/session.js";
 
-const BOOTSTRAP_REVISION = "v7-sticky-browser-session-1";
+const BOOTSTRAP_REVISION = "v8-iroh-session-grants-1";
 const RESERVED_PREFIXES = ["/.urspace/", "/.medousa/"];
 const MAX_BROWSER_REQUEST_BYTES = 16 * 1024 * 1024;
 const RESUME_REQUEST_TIMEOUT_MS = 8000;
@@ -23,6 +23,8 @@ self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim(
 self.addEventListener("message", (event) => {
   if (["urspace-arm", "medousa-arm"].includes(event.data?.type)) {
     event.waitUntil(arm(event.data, event.ports[0]));
+  } else if (event.data?.type === "urspace-resume-handoff") {
+    acceptResumeHandoff(event);
   } else if (["urspace-socket", "medousa-socket"].includes(event.data?.type)) {
     event.waitUntil(openSocket(event.data.path, event.ports[0]));
   }
@@ -39,7 +41,10 @@ async function arm(message, port) {
     const endpointSecret = connected.exportResumeKey();
     let nextResumePayload;
     try {
-      nextResumePayload = createResumePayload(invitationUrl, endpointSecret);
+      nextResumePayload = createResumePayload(
+        connected.resumeCredential || invitationUrl,
+        endpointSecret,
+      );
     } finally {
       endpointSecret.fill(0);
     }
@@ -61,6 +66,23 @@ async function arm(message, port) {
   }
 }
 
+function acceptResumeHandoff(event) {
+  if (!event.source || typeof event.source.url !== "string") return;
+  let sourceOrigin;
+  try {
+    sourceOrigin = new URL(event.source.url).origin;
+  } catch {
+    return;
+  }
+  if (sourceOrigin !== self.location.origin || typeof event.data.payload !== "string") return;
+  try {
+    parseResumePayload(event.data.payload, self.location.origin);
+    resumePayload = event.data.payload;
+  } catch {
+    // Ignore malformed or cross-origin handoffs. Recovery remains fail closed.
+  }
+}
+
 async function ensureClient() {
   if (client) return client;
   recovery ||= recoverClient().finally(() => {
@@ -70,21 +92,39 @@ async function ensureClient() {
 }
 
 async function recoverClient() {
-  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: false });
-  if (windows.length === 0) throw new Error("No live browser page can resume this session.");
-  const payload = await Promise.any(windows.map(requestResumePayload));
+  let payload = resumePayload;
+  if (!payload) {
+    const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: false });
+    if (windows.length === 0) throw new Error("No live browser page can resume this session.");
+    payload = await Promise.any(windows.map(requestResumePayload));
+  }
   const session = parseResumePayload(payload, self.location.origin);
   try {
     wasmReady ||= init();
     await wasmReady;
-    const connected = await SiteClient.resume(session.invitationUrl, session.endpointSecret);
+    const connected = await SiteClient.resume(
+      session.resumeCredential,
+      session.sessionSecret,
+      Math.floor(Date.now() / 1000),
+      self.location.origin,
+    );
+    const sessionSecret = connected.exportResumeKey();
+    let nextResumePayload;
+    try {
+      nextResumePayload = createResumePayload(
+        connected.resumeCredential || session.resumeCredential,
+        sessionSecret,
+      );
+    } finally {
+      sessionSecret.fill(0);
+    }
     client?.close();
     client = connected;
-    resumePayload = payload;
+    resumePayload = nextResumePayload;
     return connected;
   } finally {
-    session.invitationUrl = "";
-    session.endpointSecret.fill(0);
+    session.resumeCredential = "";
+    session.sessionSecret.fill(0);
   }
 }
 

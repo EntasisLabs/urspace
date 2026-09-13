@@ -40,8 +40,9 @@ urspace serve localhost:8787 \
   letters, numbers, dashes, or underscores.
 - `--ttl` controls how long the invitation accepts new browser sessions. It
   accepts whole seconds or a suffix of `s`, `m`, `h`, or `d`.
-- `--max-sessions` limits unique browser endpoints admitted by that invitation.
-  Reconnecting the same in-memory browser endpoint does not consume another slot.
+- `--max-sessions` limits stable browser sessions admitted by that invitation.
+  Reconnecting an admitted session from a new Iroh endpoint does not consume
+  another slot.
 - `--entry-path` chooses the first path the browser requests.
 
 Defaults are a one-hour lifetime, four successful browser connections, `/` as
@@ -53,11 +54,12 @@ browser connections but do not terminate a connection that was already
 authorized. An admitted browser remains authorized until the host kicks or
 revokes it, the host stops sharing, or the browser loses every in-memory copy of
 the session. Transport drops and idle service-worker eviction reconnect with the
-same ephemeral Iroh identity—even after the admission window closes or the link
-rotates—while at least one controlled Urspace page remains alive. Resumption is
-bound to both that authenticated endpoint identity and the capability; neither
-is written to browser storage. A full page discard or browser restart therefore
-requires reopening the invitation.
+same host-issued session—even after the admission window closes or the link
+rotates—while at least one controlled Urspace page remains alive. The browser
+proves possession of a session key against a fresh host nonce and its current
+ephemeral Iroh identity; the original capability is discarded after admission.
+The grant and proof key remain memory-only. A full page discard or browser
+restart therefore requires reopening the invitation.
 
 The foreground sharing console provides live controls without restarting the
 site:

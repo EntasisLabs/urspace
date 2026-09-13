@@ -51,7 +51,9 @@ port is opened, and pressing Ctrl+C stops new traffic immediately. The hour is
 an admission window: browsers already connected remain authorized after it
 closes, while new connections are rejected. If the browser evicts the idle
 service worker, a still-open Urspace page restores the same admitted Iroh
-identity from tab memory; the bearer secret is never written to browser storage.
+session from tab memory. After first admission, the browser retains a host-signed
+session grant and a separate proof key instead of the bearer capability; neither
+is written to browser storage.
 
 For a compact share URL, explicitly opt into encrypted shortening:
 
@@ -179,9 +181,16 @@ same-origin requests onto independent QUIC streams. It injects only the small
 WebSocket compatibility shim into HTML responses; application scripts otherwise
 run unchanged at the capability-derived site origin.
 
-If the browser terminates the worker, the connection fails closed. The invite
-is not persisted to IndexedDB, Cache Storage, cookies, or local storage; reopen
-the original invite to reconnect.
+Ordinary refreshes and idle service-worker restarts recover automatically while
+an Urspace page remains alive. The first trusted injected script keeps the
+host-signed grant and browser proof key in a closure and hands them back only to
+the exact-origin service worker. The original invitation capability is discarded
+after admission. Nothing is persisted to IndexedDB, Cache Storage, cookies, or
+web storage, so closing every page or restarting the browser still fails closed
+and requires the invitation again.
+
+See [docs/session-grants.md](docs/session-grants.md) for the v4 proof-of-possession
+protocol and reconnect transcript.
 
 See [SECURITY.md](SECURITY.md) before exposing a non-development bootstrap.
 The production container, wildcard DNS/TLS contract, verification steps, and
