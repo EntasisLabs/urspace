@@ -11,10 +11,14 @@ use iroh::{Endpoint, SecretKey, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
 use rand::Rng as _;
 use tokio::io::AsyncBufReadExt as _;
-use urspace_host::{CapabilityRegistry, LoopbackSite, SiteProtocol, StaticSite, unix_now};
+use urspace_host::{
+    CapabilityRegistry, LoopbackSite, SessionGrantIssuer, SiteProtocol, StaticSite, unix_now,
+};
 use urspace_protocol::{
-    ALPN, ClientHello, InviteGrant, RequestMethod, ServerHello, SiteRequest, SiteResponseHead,
-    alpn_for_invite, invite_url, read_frame, sign_invite, verify_invite_url, write_frame,
+    ALPN, ClientAuthV4, ClientHello, ClientProofV4, INVITE_VERSION, InviteGrant, RequestMethod,
+    SESSION_PROOF_VERSION, ServerAuthV4, ServerHello, ServerHelloV4, SessionProofPayload,
+    SessionProofPurpose, SiteRequest, SiteResponseHead, alpn_for_invite, invite_url, read_frame,
+    sign_invite, sign_session_proof, verify_invite_url, verify_session_grant, write_frame,
 };
 use uuid::Uuid;
 
@@ -224,7 +228,7 @@ async fn serve_static(root: PathBuf, settings: ShareSettings) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 async fn serve_protocol<T>(
-    make_protocol: fn(CapabilityRegistry, T) -> SiteProtocol,
+    make_protocol: fn(CapabilityRegistry, T, SessionGrantIssuer) -> SiteProtocol,
     site: T,
     source_description: String,
     bootstrap_origin: String,
@@ -257,8 +261,14 @@ async fn serve_protocol<T>(
     )?;
     let share_url = publish_share_url(&raw_url, expires_at_unix, short_links.as_ref()).await;
     let shortened = share_url != raw_url;
+    let issuer = SessionGrantIssuer::new(
+        identity.clone(),
+        bootstrap_origin.clone(),
+        EndpointTicket::new(endpoint.addr()).to_string(),
+        entry_path.clone(),
+    );
     let router = Router::builder(endpoint.clone())
-        .accept(ALPN, make_protocol(registry.clone(), site))
+        .accept(ALPN, make_protocol(registry.clone(), site, issuer))
         .spawn();
 
     println!("Urspace is serving {source_description}");
@@ -504,9 +514,8 @@ fn kick_session(registry: &CapabilityRegistry, prefix: &str) -> bool {
             false
         }
         [session] => {
-            let endpoint = session.endpoint_id;
-            if registry.kick(endpoint) {
-                println!("Kicked session {}.", endpoint.to_z32());
+            if registry.kick(session.session_id) {
+                println!("Kicked the selected browser session.");
                 true
             } else {
                 false
@@ -533,20 +542,65 @@ async fn get(raw_invite: &str, requested_path: &str) -> Result<()> {
         .await
         .context("connect to site")?;
 
-    let (mut hello_send, mut hello_recv) = connection.open_bi().await?;
-    write_frame(
-        &mut hello_send,
-        &ClientHello {
-            version: invite.version,
-            invite_id: invite.invite_id,
-            capability: invite.capability,
-        },
-    )
-    .await?;
-    hello_send.finish()?;
-    match read_frame::<_, ServerHello>(&mut hello_recv).await? {
-        ServerHello::Granted { .. } => {}
-        ServerHello::Denied { code } => bail!("site denied invitation: {code:?}"),
+    if invite.version == INVITE_VERSION {
+        let session_key = SecretKey::generate();
+        let (mut hello_send, mut hello_recv) = connection.open_bi().await?;
+        write_frame(
+            &mut hello_send,
+            &ClientAuthV4::Admit {
+                invite_id: invite.invite_id,
+                capability: invite.capability,
+                session_public_key: *session_key.public().as_bytes(),
+            },
+        )
+        .await?;
+        let challenge = match read_frame(&mut hello_recv).await? {
+            ServerAuthV4::Challenge(challenge) => challenge,
+            ServerAuthV4::Denied { code } => bail!("site denied invitation: {code:?}"),
+        };
+        let proof = SessionProofPayload {
+            version: SESSION_PROOF_VERSION,
+            purpose: SessionProofPurpose::Admit,
+            host_id: *ticket.endpoint_addr().id.as_bytes(),
+            site_id: ticket.endpoint_addr().id.to_z32(),
+            alpn: ALPN.to_vec(),
+            session_id: challenge.session_id,
+            session_grant_hash: [0_u8; 32],
+            endpoint_id: *endpoint.id().as_bytes(),
+            challenge_id: challenge.challenge_id,
+            nonce: challenge.nonce,
+            expires_at_unix: challenge.expires_at_unix,
+        };
+        write_frame(
+            &mut hello_send,
+            &ClientProofV4 {
+                signature: sign_session_proof(&session_key, &proof)?,
+            },
+        )
+        .await?;
+        hello_send.finish()?;
+        match read_frame(&mut hello_recv).await? {
+            ServerHelloV4::Granted { session_grant } => {
+                verify_session_grant(&session_grant, unix_now())?;
+            }
+            ServerHelloV4::Denied { code } => bail!("site denied invitation: {code:?}"),
+        }
+    } else {
+        let (mut hello_send, mut hello_recv) = connection.open_bi().await?;
+        write_frame(
+            &mut hello_send,
+            &ClientHello {
+                version: invite.version,
+                invite_id: invite.invite_id,
+                capability: invite.capability,
+            },
+        )
+        .await?;
+        hello_send.finish()?;
+        match read_frame::<_, ServerHello>(&mut hello_recv).await? {
+            ServerHello::Granted { .. } => {}
+            ServerHello::Denied { code } => bail!("site denied invitation: {code:?}"),
+        }
     }
 
     let path = if requested_path == "/" {

@@ -104,8 +104,8 @@ test("round-trips a tab-scoped resume identity without exposing it in HTML text"
   const payload = createResumePayload(SHORT_LINK_VECTOR.invitationUrl, endpointSecret);
   const resumed = parseResumePayload(payload);
 
-  assert.equal(resumed.invitationUrl, SHORT_LINK_VECTOR.invitationUrl);
-  assert.deepEqual(resumed.endpointSecret, endpointSecret);
+  assert.equal(resumed.resumeCredential, SHORT_LINK_VECTOR.invitationUrl);
+  assert.deepEqual(resumed.sessionSecret, endpointSecret);
   assert.throws(
     () => parseResumePayload(payload, "https://other.urspace.online"),
     /resume session is malformed/,
@@ -128,6 +128,12 @@ test("round-trips a tab-scoped resume identity without exposing it in HTML text"
   assert.equal(html.includes(SHORT_LINK_VECTOR.invitationUrl), false);
   assert.ok(html.indexOf("socket-shim.js") < html.indexOf("<html>"));
   assert.ok(html.indexOf("socket-shim.js") < html.indexOf("<title>"));
+
+  const sessionGrant = `usg1.${"A".repeat(96)}`;
+  const grantPayload = createResumePayload(sessionGrant, endpointSecret);
+  const grantResume = parseResumePayload(grantPayload, "https://ignored.example");
+  assert.equal(grantResume.resumeCredential, sessionGrant);
+  assert.deepEqual(grantResume.sessionSecret, endpointSecret);
 });
 
 test("rejects malformed resume payloads and remote plaintext invitations", () => {
@@ -179,6 +185,7 @@ test("the inline bootstrap hides its resume payload and answers only trusted wor
   const payload = createResumePayload(SHORT_LINK_VECTOR.invitationUrl, endpointSecret);
   let removed = false;
   let workerMessageHandler = null;
+  const lifecycleHandlers = new Map();
 
   class FakeMessagePort {
     postMessage(value) {
@@ -190,8 +197,23 @@ test("the inline bootstrap hides its resume payload and answers only trusted wor
     }
   }
 
+  class FakeServiceWorker {
+    postMessage(value) {
+      this.sent = value;
+    }
+  }
+
+  const controller = new FakeServiceWorker();
+
   const context = {
+    addEventListener(type, handler) {
+      lifecycleHandlers.set(type, handler);
+    },
     document: {
+      visibilityState: "visible",
+      addEventListener(type, handler) {
+        lifecycleHandlers.set(type, handler);
+      },
       currentScript: {
         dataset: { urspaceResume: payload },
         remove() {
@@ -201,12 +223,14 @@ test("the inline bootstrap hides its resume payload and answers only trusted wor
     },
     navigator: {
       serviceWorker: {
+        controller,
         addEventListener(type, handler) {
           if (type === "message") workerMessageHandler = handler;
         },
       },
     },
     MessagePort: FakeMessagePort,
+    ServiceWorker: FakeServiceWorker,
     EventTarget,
     DOMException,
     URL,
@@ -216,6 +240,10 @@ test("the inline bootstrap hides its resume payload and answers only trusted wor
 
   assert.equal(removed, true);
   assert.equal(typeof workerMessageHandler, "function");
+
+  lifecycleHandlers.get("beforeunload")();
+  assert.equal(controller.sent.type, "urspace-resume-handoff");
+  assert.equal(controller.sent.payload, payload);
 
   const untrustedPort = new FakeMessagePort();
   workerMessageHandler({

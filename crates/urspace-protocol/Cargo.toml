@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 base64.workspace = true
+blake3.workspace = true
 iroh-base.workspace = true
 iroh-tickets.workspace = true
 postcard.workspace = true

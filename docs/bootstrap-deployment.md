@@ -15,7 +15,7 @@ The production Urspace base domain is `urspace.online`. Each invitation uses
 exactly one identity label beneath it:
 
 ```text
-https://<iroh-public-key>.urspace.online/.urspace/open/#u3=<signed-invite>
+https://<iroh-public-key>.urspace.online/.urspace/open/#u4=<signed-invite>
 ```
 
 For the default Urspace deployment, Cloudflare provisions wildcard TLS and runs

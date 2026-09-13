@@ -10,10 +10,13 @@ use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
-pub const ALPN: &[u8] = b"urspace-site/3";
-pub const INVITE_VERSION: u8 = 3;
+pub const ALPN: &[u8] = b"urspace-site/4";
+pub const INVITE_VERSION: u8 = 4;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const BOOTSTRAP_PATH: &str = "/.urspace/open/";
+
+pub const LEGACY_V3_ALPN: &[u8] = b"urspace-site/3";
+pub const LEGACY_V3_INVITE_VERSION: u8 = 3;
 
 // Kept only so v0.1 invitation URLs continue to open during the v0.2 migration.
 pub const LEGACY_V2_ALPN: &[u8] = b"medousa-site/2";
@@ -61,6 +64,107 @@ pub struct ClientHello {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServerHello {
     Granted { expires_at_unix: i64 },
+    Denied { code: DenialCode },
+}
+
+pub const SESSION_GRANT_VERSION: u8 = 1;
+pub const SESSION_PROOF_VERSION: u8 = 1;
+const SESSION_GRANT_PREFIX: &str = "usg1.";
+const SESSION_GRANT_DOMAIN: &[u8] = b"urspace-session-grant-v1\0";
+const SESSION_PROOF_DOMAIN: &[u8] = b"urspace-session-proof-v1\0";
+const MAX_SESSION_GRANT_BYTES: usize = 16 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionGrantPayload {
+    pub version: u8,
+    pub host_id: [u8; 32],
+    pub site_id: String,
+    pub bootstrap_origin: String,
+    pub endpoint_ticket: String,
+    pub invite_id: Uuid,
+    pub session_id: Uuid,
+    pub session_public_key: [u8; 32],
+    pub issued_at_unix: i64,
+    pub expires_at_unix: i64,
+    pub authorization_epoch: u64,
+    pub entry_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionGrantIssue {
+    pub bootstrap_origin: String,
+    pub endpoint_ticket: String,
+    pub invite_id: Uuid,
+    pub session_id: Uuid,
+    pub session_public_key: [u8; 32],
+    pub issued_at_unix: i64,
+    pub expires_at_unix: i64,
+    pub authorization_epoch: u64,
+    pub entry_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SignedSessionGrant {
+    payload: SessionGrantPayload,
+    signer: [u8; 32],
+    signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionProofPurpose {
+    Admit,
+    Resume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionProofPayload {
+    pub version: u8,
+    pub purpose: SessionProofPurpose,
+    pub host_id: [u8; 32],
+    pub site_id: String,
+    pub alpn: Vec<u8>,
+    pub session_id: Uuid,
+    pub session_grant_hash: [u8; 32],
+    pub endpoint_id: [u8; 32],
+    pub challenge_id: Uuid,
+    pub nonce: [u8; 32],
+    pub expires_at_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClientAuthV4 {
+    Admit {
+        invite_id: Uuid,
+        capability: [u8; 32],
+        session_public_key: [u8; 32],
+    },
+    Resume {
+        session_grant: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChallengeV4 {
+    pub challenge_id: Uuid,
+    pub session_id: Uuid,
+    pub nonce: [u8; 32],
+    pub expires_at_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerAuthV4 {
+    Challenge(SessionChallengeV4),
+    Denied { code: DenialCode },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientProofV4 {
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerHelloV4 {
+    Granted { session_grant: String },
     Denied { code: DenialCode },
 }
 
@@ -139,6 +243,228 @@ pub enum InviteError {
     InvalidEntryPath,
 }
 
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum SessionGrantError {
+    #[error("session grant encoding is invalid")]
+    InvalidEncoding,
+    #[error("session grant version is unsupported")]
+    UnsupportedVersion,
+    #[error("session grant signature is invalid")]
+    InvalidSignature,
+    #[error("session grant signer does not match its host")]
+    HostIdentityMismatch,
+    #[error("session grant endpoint does not match its host")]
+    EndpointMismatch,
+    #[error("session grant site origin is invalid")]
+    InvalidOrigin,
+    #[error("session grant entry path is invalid")]
+    InvalidEntryPath,
+    #[error("session grant lifetime is invalid")]
+    InvalidLifetime,
+    #[error("session grant has expired")]
+    Expired,
+    #[error("session proof is invalid")]
+    InvalidProof,
+}
+
+pub fn sign_session_grant(
+    identity: &SecretKey,
+    issue: SessionGrantIssue,
+) -> Result<String, SessionGrantError> {
+    if issue.issued_at_unix < 0 || issue.expires_at_unix <= issue.issued_at_unix {
+        return Err(SessionGrantError::InvalidLifetime);
+    }
+    validate_entry_path(&issue.entry_path).map_err(|_| SessionGrantError::InvalidEntryPath)?;
+    let bootstrap_origin = normalize_bootstrap_origin(&issue.bootstrap_origin)
+        .map_err(|_| SessionGrantError::InvalidOrigin)?;
+    let payload = SessionGrantPayload {
+        version: SESSION_GRANT_VERSION,
+        host_id: *identity.public().as_bytes(),
+        site_id: identity.public().to_z32(),
+        bootstrap_origin,
+        endpoint_ticket: issue.endpoint_ticket,
+        invite_id: issue.invite_id,
+        session_id: issue.session_id,
+        session_public_key: issue.session_public_key,
+        issued_at_unix: issue.issued_at_unix,
+        expires_at_unix: issue.expires_at_unix,
+        authorization_epoch: issue.authorization_epoch,
+        entry_path: issue.entry_path,
+    };
+    validate_session_grant_payload(&payload, None)?;
+    let payload_bytes =
+        postcard::to_allocvec(&payload).map_err(|_| SessionGrantError::InvalidEncoding)?;
+    let signed = SignedSessionGrant {
+        payload,
+        signer: *identity.public().as_bytes(),
+        signature: identity
+            .sign(&domain_message(SESSION_GRANT_DOMAIN, &payload_bytes))
+            .to_bytes()
+            .to_vec(),
+    };
+    let encoded = postcard::to_allocvec(&signed).map_err(|_| SessionGrantError::InvalidEncoding)?;
+    if encoded.len() > MAX_SESSION_GRANT_BYTES {
+        return Err(SessionGrantError::InvalidEncoding);
+    }
+    Ok(format!(
+        "{SESSION_GRANT_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(encoded)
+    ))
+}
+
+pub fn verify_session_grant(
+    encoded: &str,
+    now_unix: i64,
+) -> Result<SessionGrantPayload, SessionGrantError> {
+    let value = encoded
+        .strip_prefix(SESSION_GRANT_PREFIX)
+        .ok_or(SessionGrantError::InvalidEncoding)?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| SessionGrantError::InvalidEncoding)?;
+    if bytes.is_empty() || bytes.len() > MAX_SESSION_GRANT_BYTES {
+        return Err(SessionGrantError::InvalidEncoding);
+    }
+    let signed: SignedSessionGrant =
+        postcard::from_bytes(&bytes).map_err(|_| SessionGrantError::InvalidEncoding)?;
+    let canonical =
+        postcard::to_allocvec(&signed).map_err(|_| SessionGrantError::InvalidEncoding)?;
+    if canonical != bytes {
+        return Err(SessionGrantError::InvalidEncoding);
+    }
+    validate_session_grant_payload(&signed.payload, Some(now_unix))?;
+    if signed.signer != signed.payload.host_id {
+        return Err(SessionGrantError::HostIdentityMismatch);
+    }
+    let public =
+        PublicKey::from_bytes(&signed.signer).map_err(|_| SessionGrantError::InvalidSignature)?;
+    let signature_bytes: [u8; Signature::LENGTH] = signed
+        .signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| SessionGrantError::InvalidSignature)?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    let payload_bytes =
+        postcard::to_allocvec(&signed.payload).map_err(|_| SessionGrantError::InvalidEncoding)?;
+    public
+        .verify(
+            &domain_message(SESSION_GRANT_DOMAIN, &payload_bytes),
+            &signature,
+        )
+        .map_err(|_| SessionGrantError::InvalidSignature)?;
+    Ok(signed.payload)
+}
+
+pub fn session_grant_hash(encoded: &str) -> [u8; 32] {
+    *blake3::hash(encoded.as_bytes()).as_bytes()
+}
+
+pub fn session_grant_origin(payload: &SessionGrantPayload) -> Result<String, SessionGrantError> {
+    validate_session_grant_payload(payload, None)?;
+    let mut url =
+        Url::parse(&payload.bootstrap_origin).map_err(|_| SessionGrantError::InvalidOrigin)?;
+    let host = format!(
+        "{}.{}",
+        payload.site_id,
+        url.host_str().ok_or(SessionGrantError::InvalidOrigin)?
+    );
+    url.set_host(Some(&host))
+        .map_err(|_| SessionGrantError::InvalidOrigin)?;
+    Ok(url.origin().ascii_serialization())
+}
+
+pub fn sign_session_proof(
+    session_key: &SecretKey,
+    proof: &SessionProofPayload,
+) -> Result<Vec<u8>, SessionGrantError> {
+    validate_session_proof_payload(proof, None)?;
+    let bytes = postcard::to_allocvec(proof).map_err(|_| SessionGrantError::InvalidProof)?;
+    Ok(session_key
+        .sign(&domain_message(SESSION_PROOF_DOMAIN, &bytes))
+        .to_bytes()
+        .to_vec())
+}
+
+pub fn verify_session_proof(
+    session_public_key: &[u8; 32],
+    proof: &SessionProofPayload,
+    signature: &[u8],
+    now_unix: i64,
+) -> Result<(), SessionGrantError> {
+    validate_session_proof_payload(proof, Some(now_unix))?;
+    let public =
+        PublicKey::from_bytes(session_public_key).map_err(|_| SessionGrantError::InvalidProof)?;
+    let signature_bytes: [u8; Signature::LENGTH] = signature
+        .try_into()
+        .map_err(|_| SessionGrantError::InvalidProof)?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    let bytes = postcard::to_allocvec(proof).map_err(|_| SessionGrantError::InvalidProof)?;
+    public
+        .verify(&domain_message(SESSION_PROOF_DOMAIN, &bytes), &signature)
+        .map_err(|_| SessionGrantError::InvalidProof)
+}
+
+fn validate_session_grant_payload(
+    payload: &SessionGrantPayload,
+    now_unix: Option<i64>,
+) -> Result<(), SessionGrantError> {
+    if payload.version != SESSION_GRANT_VERSION {
+        return Err(SessionGrantError::UnsupportedVersion);
+    }
+    if payload.issued_at_unix < 0 || payload.expires_at_unix <= payload.issued_at_unix {
+        return Err(SessionGrantError::InvalidLifetime);
+    }
+    if now_unix.is_some_and(|now| payload.expires_at_unix <= now) {
+        return Err(SessionGrantError::Expired);
+    }
+    validate_entry_path(&payload.entry_path).map_err(|_| SessionGrantError::InvalidEntryPath)?;
+    if normalize_bootstrap_origin(&payload.bootstrap_origin)
+        .map_err(|_| SessionGrantError::InvalidOrigin)?
+        != payload.bootstrap_origin
+    {
+        return Err(SessionGrantError::InvalidOrigin);
+    }
+    let public =
+        PublicKey::from_bytes(&payload.host_id).map_err(|_| SessionGrantError::InvalidSignature)?;
+    if public.to_z32() != payload.site_id {
+        return Err(SessionGrantError::HostIdentityMismatch);
+    }
+    let ticket = EndpointTicket::from_str(&payload.endpoint_ticket)
+        .map_err(|_| SessionGrantError::EndpointMismatch)?;
+    if ticket.endpoint_addr().id != public {
+        return Err(SessionGrantError::EndpointMismatch);
+    }
+    PublicKey::from_bytes(&payload.session_public_key)
+        .map_err(|_| SessionGrantError::InvalidProof)?;
+    Ok(())
+}
+
+fn validate_session_proof_payload(
+    proof: &SessionProofPayload,
+    now_unix: Option<i64>,
+) -> Result<(), SessionGrantError> {
+    if proof.version != SESSION_PROOF_VERSION || proof.alpn != ALPN {
+        return Err(SessionGrantError::InvalidProof);
+    }
+    if proof.expires_at_unix < 0 || now_unix.is_some_and(|now| proof.expires_at_unix <= now) {
+        return Err(SessionGrantError::InvalidProof);
+    }
+    let host =
+        PublicKey::from_bytes(&proof.host_id).map_err(|_| SessionGrantError::InvalidProof)?;
+    if host.to_z32() != proof.site_id {
+        return Err(SessionGrantError::InvalidProof);
+    }
+    PublicKey::from_bytes(&proof.endpoint_id).map_err(|_| SessionGrantError::InvalidProof)?;
+    Ok(())
+}
+
+fn domain_message(domain: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(domain.len() + payload.len());
+    message.extend_from_slice(domain);
+    message.extend_from_slice(payload);
+    message
+}
+
 pub fn sign_invite(identity: &SecretKey, grant: InviteGrant) -> Result<String, InviteError> {
     sign_invite_version(identity, grant, INVITE_VERSION)
 }
@@ -194,7 +520,7 @@ pub fn verify_invite_url(raw: &str, now_unix: i64) -> Result<InvitePayload, Invi
     verify_invite_url_inner(raw, Some(now_unix))
 }
 
-/// Verifies a previously admitted invitation without enforcing its admission expiry.
+/// Verifies a legacy v2/v3 invitation without enforcing its admission expiry.
 ///
 /// The host remains the authorization boundary: it accepts this invitation only when the
 /// connecting endpoint identity was admitted before expiry and has not been kicked or revoked.
@@ -205,8 +531,10 @@ pub fn verify_invite_url_for_resume(raw: &str) -> Result<InvitePayload, InviteEr
 fn verify_invite_url_inner(raw: &str, now_unix: Option<i64>) -> Result<InvitePayload, InviteError> {
     let url = Url::parse(raw).map_err(|_| InviteError::InvalidBootstrapUrl)?;
     let fragment = url.fragment().ok_or(InviteError::MissingFragment)?;
-    let (fragment_version, encoded) = if let Some(encoded) = fragment.strip_prefix("u3=") {
+    let (fragment_version, encoded) = if let Some(encoded) = fragment.strip_prefix("u4=") {
         (INVITE_VERSION, encoded)
+    } else if let Some(encoded) = fragment.strip_prefix("u3=") {
+        (LEGACY_V3_INVITE_VERSION, encoded)
     } else if let Some(encoded) = fragment.strip_prefix("m2=") {
         (LEGACY_V2_INVITE_VERSION, encoded)
     } else {
@@ -294,6 +622,11 @@ fn wire_profile(version: u8) -> Result<WireProfile, InviteError> {
     match version {
         INVITE_VERSION => Ok(WireProfile {
             alpn: ALPN,
+            bootstrap_path: BOOTSTRAP_PATH,
+            fragment_prefix: "u4",
+        }),
+        LEGACY_V3_INVITE_VERSION => Ok(WireProfile {
+            alpn: LEGACY_V3_ALPN,
             bootstrap_path: BOOTSTRAP_PATH,
             fragment_prefix: "u3",
         }),
@@ -397,7 +730,7 @@ mod tests {
         let (identity, encoded, capability) = fixture(2_000);
         let url = invite_url(&encoded).unwrap();
         assert_eq!(url.path(), BOOTSTRAP_PATH);
-        assert!(url.fragment().unwrap().starts_with("u3="));
+        assert!(url.fragment().unwrap().starts_with("u4="));
         let payload = verify_invite_url(url.as_str(), 1_000).unwrap();
         assert_eq!(payload.site_id, identity.public().to_z32());
         assert_eq!(payload.capability, capability);
@@ -416,7 +749,7 @@ mod tests {
     #[test]
     fn wrong_origin_and_expiry_are_rejected() {
         let (_, encoded, _) = fixture(2_000);
-        let wrong = format!("https://attacker.sites.example/.urspace/open/#u3={encoded}");
+        let wrong = format!("https://attacker.sites.example/.urspace/open/#u4={encoded}");
         assert!(matches!(
             verify_invite_url(&wrong, 1_000),
             Err(InviteError::OriginMismatch)
@@ -440,7 +773,7 @@ mod tests {
         assert_eq!(payload.bootstrap_origin, "https://sites.example");
 
         let attacker = format!(
-            "https://{}.attacker.example/.urspace/open/#u3={encoded}",
+            "https://{}.attacker.example/.urspace/open/#u4={encoded}",
             payload.site_id
         );
         assert!(matches!(
@@ -490,6 +823,158 @@ mod tests {
         assert!(matches!(
             verify_invite_url(&mismatched, 1_000),
             Err(InviteError::UnsupportedVersion)
+        ));
+    }
+
+    #[test]
+    fn legacy_v3_invites_keep_their_original_url_and_alpn() {
+        let identity = SecretKey::generate();
+        let encoded = sign_invite_version(
+            &identity,
+            InviteGrant {
+                bootstrap_origin: "https://sites.example".into(),
+                endpoint_ticket: EndpointTicket::new(EndpointAddr::new(identity.public()))
+                    .to_string(),
+                invite_id: Uuid::nil(),
+                capability: [4_u8; 32],
+                expires_at_unix: 2_000,
+                entry_path: "/".into(),
+                max_sessions: 1,
+            },
+            LEGACY_V3_INVITE_VERSION,
+        )
+        .unwrap();
+        let url = invite_url(&encoded).unwrap();
+        assert!(url.fragment().unwrap().starts_with("u3="));
+        assert_eq!(
+            alpn_for_invite(LEGACY_V3_INVITE_VERSION).unwrap(),
+            LEGACY_V3_ALPN
+        );
+        assert_eq!(
+            verify_invite_url(url.as_str(), 1_000).unwrap().version,
+            LEGACY_V3_INVITE_VERSION
+        );
+    }
+
+    fn grant_fixture() -> (SecretKey, SecretKey, String) {
+        let host = SecretKey::generate();
+        let session = SecretKey::generate();
+        let grant = sign_session_grant(
+            &host,
+            SessionGrantIssue {
+                bootstrap_origin: "https://sites.example".into(),
+                endpoint_ticket: EndpointTicket::new(EndpointAddr::new(host.public())).to_string(),
+                invite_id: Uuid::from_u128(1),
+                session_id: Uuid::from_u128(2),
+                session_public_key: *session.public().as_bytes(),
+                issued_at_unix: 1_000,
+                expires_at_unix: 2_000,
+                authorization_epoch: 7,
+                entry_path: "/app".into(),
+            },
+        )
+        .unwrap();
+        (host, session, grant)
+    }
+
+    #[test]
+    fn session_grant_round_trips_without_a_bearer_capability() {
+        let (host, session, grant) = grant_fixture();
+        let payload = verify_session_grant(&grant, 1_500).unwrap();
+        assert_eq!(payload.host_id, *host.public().as_bytes());
+        assert_eq!(payload.session_public_key, *session.public().as_bytes());
+        assert_eq!(payload.session_id, Uuid::from_u128(2));
+        assert_eq!(payload.authorization_epoch, 7);
+        assert!(!grant.contains("sites.example"));
+        assert!(matches!(
+            verify_session_grant(&grant, 2_000),
+            Err(SessionGrantError::Expired)
+        ));
+        assert_eq!(
+            session_grant_origin(&payload).unwrap(),
+            format!("https://{}.sites.example", host.public().to_z32())
+        );
+    }
+
+    #[test]
+    fn tampered_session_grants_are_rejected() {
+        let (_, _, grant) = grant_fixture();
+        let encoded = grant.strip_prefix(SESSION_GRANT_PREFIX).unwrap();
+        let mut bytes = URL_SAFE_NO_PAD.decode(encoded).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 1;
+        let tampered = format!("{SESSION_GRANT_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes));
+        assert!(verify_session_grant(&tampered, 1_500).is_err());
+    }
+
+    #[test]
+    fn session_proofs_bind_grant_endpoint_and_host_nonce() {
+        let (host, session, grant) = grant_fixture();
+        let endpoint = SecretKey::generate();
+        let proof = SessionProofPayload {
+            version: SESSION_PROOF_VERSION,
+            purpose: SessionProofPurpose::Resume,
+            host_id: *host.public().as_bytes(),
+            site_id: host.public().to_z32(),
+            alpn: ALPN.to_vec(),
+            session_id: Uuid::from_u128(2),
+            session_grant_hash: session_grant_hash(&grant),
+            endpoint_id: *endpoint.public().as_bytes(),
+            challenge_id: Uuid::from_u128(3),
+            nonce: [9_u8; 32],
+            expires_at_unix: 1_600,
+        };
+        let signature = sign_session_proof(&session, &proof).unwrap();
+        verify_session_proof(session.public().as_bytes(), &proof, &signature, 1_500).unwrap();
+
+        let wrong_session = SecretKey::generate();
+        assert!(
+            verify_session_proof(wrong_session.public().as_bytes(), &proof, &signature, 1_500)
+                .is_err()
+        );
+
+        let mut wrong_endpoint = proof.clone();
+        wrong_endpoint.endpoint_id = *SecretKey::generate().public().as_bytes();
+        assert!(
+            verify_session_proof(
+                session.public().as_bytes(),
+                &wrong_endpoint,
+                &signature,
+                1_500
+            )
+            .is_err()
+        );
+
+        let mut wrong_nonce = proof;
+        wrong_nonce.nonce[0] ^= 1;
+        assert!(
+            verify_session_proof(session.public().as_bytes(), &wrong_nonce, &signature, 1_500)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn session_proofs_reject_a_substituted_site_identity() {
+        let (host, session, grant) = grant_fixture();
+        let endpoint = SecretKey::generate();
+        let mut proof = SessionProofPayload {
+            version: SESSION_PROOF_VERSION,
+            purpose: SessionProofPurpose::Resume,
+            host_id: *host.public().as_bytes(),
+            site_id: host.public().to_z32(),
+            alpn: ALPN.to_vec(),
+            session_id: Uuid::from_u128(2),
+            session_grant_hash: session_grant_hash(&grant),
+            endpoint_id: *endpoint.public().as_bytes(),
+            challenge_id: Uuid::from_u128(3),
+            nonce: [9_u8; 32],
+            expires_at_unix: 1_600,
+        };
+        proof.site_id = SecretKey::generate().public().to_z32();
+
+        assert!(matches!(
+            sign_session_proof(&session, &proof),
+            Err(SessionGrantError::InvalidProof)
         ));
     }
 }
