@@ -494,11 +494,7 @@ fn print_sessions(registry: &CapabilityRegistry) {
         } else {
             "disconnected (may reconnect)"
         };
-        println!(
-            "{}  {}  {state}",
-            session.session_id,
-            session.endpoint_id.to_z32()
-        );
+        println!("{}  {state}", session.endpoint_id.to_z32());
     }
 }
 
@@ -510,10 +506,7 @@ fn kick_session(registry: &CapabilityRegistry, prefix: &str) -> bool {
     let matches: Vec<_> = registry
         .sessions()
         .into_iter()
-        .filter(|session| {
-            session.session_id.to_string().starts_with(prefix)
-                || session.endpoint_id.to_z32().starts_with(prefix)
-        })
+        .filter(|session| session.endpoint_id.to_z32().starts_with(prefix))
         .collect();
     match matches.as_slice() {
         [] => {
@@ -522,7 +515,7 @@ fn kick_session(registry: &CapabilityRegistry, prefix: &str) -> bool {
         }
         [session] => {
             if registry.kick(session.session_id) {
-                println!("Kicked session {}.", session.session_id);
+                println!("Kicked the selected browser session.");
                 true
             } else {
                 false
