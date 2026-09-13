@@ -16,7 +16,7 @@ case "$(uname -s):$(uname -m)" in
   Linux:x86_64) target="x86_64-unknown-linux-gnu" ;;
   Linux:aarch64 | Linux:arm64) target="aarch64-unknown-linux-gnu" ;;
   *)
-    echo "No Urspace preview binary is published for $(uname -s) $(uname -m)." >&2
+    echo "No Urspace binary is published for $(uname -s) $(uname -m)." >&2
     exit 1
     ;;
 esac
