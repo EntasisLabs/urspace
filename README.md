@@ -1,18 +1,70 @@
 # Urspace
 
-Capability-addressed web apps served from a private machine over Iroh. The
-browser receives a signed, expiring invite URL; a generic bootstrap verifies it,
-connects to the named Iroh endpoint, and exposes the app at an isolated origin.
+Share a web app running on your computer with one private link.
 
-Protocol knowledge is not an authorization factor. Access requires the random
-256-bit capability in the URL fragment, and the endpoint key signs every field
-that decides where and how the browser connects.
+```bash
+urspace serve localhost:8787 --short
+```
 
-## Install and share
+Send the link to someone. They open it in Chrome and use your app. They do not
+need an Urspace account, a VPN, a command-line tool, or access to your network.
+Your app stays on your computer, and you do not have to open a router port.
 
-Prebuilt releases are published for Apple Silicon and Intel macOS, Arm64 and
-x86-64 Linux, and x86-64 Windows. macOS and Linux users can install the latest
-release without a Rust toolchain:
+Stop Urspace and the site goes away.
+
+> Urspace is an early preview. Chrome and Chromium-based browsers are the main
+> supported path today. Safari support is still experimental.
+
+## What is Urspace for?
+
+Urspace is useful when you want to share something that already runs locally:
+
+- a work-in-progress website
+- a private dashboard or home service
+- a game, demo, or tool for a few friends
+- a full local app such as BoxClub or StreetClanker
+
+The important difference is that you share an **invitation**, not a public
+server. The invitation can expire, limit how many people may enter, and be
+replaced whenever you want. Once admitted, a browser can normally refresh and
+reconnect without asking for the original invitation again. The host can still
+kick that browser out at any time.
+
+Urspace is not trying to be a general-purpose VPN or permanent public hosting.
+It is for giving a browser temporary, private access to one local web app.
+
+## How is it different from Tailscale or Cloudflare Tunnel?
+
+They solve related problems, but they start from different ideas:
+
+| Tool | Best fit | Who can open the site? | What the host sets up |
+| --- | --- | --- | --- |
+| **Urspace** | Privately sharing one local web app with a person | Anyone you send a valid invitation to; they only need a supported browser | Run one `urspace serve` command |
+| [**Tailscale Serve**](https://tailscale.com/docs/reference/tailscale-cli/serve) | Sharing a service inside an existing private Tailscale network | People or devices already allowed into that Tailscale network | Tailscale on the participating devices and network access rules |
+| [**Tailscale Funnel**](https://tailscale.com/docs/features/tailscale-funnel) | Publishing a local service to the public internet | Anyone on the internet while the Funnel is running | A Tailscale account, device, and Funnel configuration |
+| [**Cloudflare Tunnel**](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/) | Putting a stable hostname in front of a private service | The public, or users allowed by separately configured Cloudflare Access rules | `cloudflared`, a Cloudflare setup, DNS, and any access rules |
+
+The short version:
+
+- Choose **Tailscale Serve** when everyone should join the same private network.
+- Choose **Tailscale Funnel** or **Cloudflare Tunnel** when you want a normal,
+  stable internet address and their surrounding platform features.
+- Choose **Urspace** when the guest should install nothing and possession of a
+  temporary invitation should be enough to enter one app.
+
+Urspace does use a small Cloudflare-hosted page to start the browser connection,
+and optionally to store an encrypted short-link record. Cloudflare does **not**
+proxy the app itself. After the page opens, app requests travel over an
+end-to-end encrypted Iroh connection between the browser and the host. The
+current browser path uses an Iroh relay to carry those encrypted bytes, but the
+relay cannot read the app traffic.
+
+## Install
+
+Prebuilt releases are available for Apple Silicon and Intel macOS, Arm64 and
+x86-64 Linux, and x86-64 Windows.
+
+On macOS or Linux:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL \
@@ -20,18 +72,11 @@ curl --proto '=https' --tlsv1.2 -fsSL \
   | bash
 ```
 
-Set `URSPACE_INSTALL_DIR` to choose a destination other than `~/.local/bin`, or
-download the script and pass a tag such as `v0.2.1` to install an exact release.
-The installer uses public GitHub release URLs and verifies the selected archive
-against the release's `SHA256SUMS` before installing it. Windows users can
-download `urspace-*-x86_64-pc-windows-msvc.zip` from
-[GitHub Releases](https://github.com/EntasisLabs/urspace/releases).
-Every release archive contains the license texts and has GitHub build-provenance
-attestations. A downloaded archive can be independently checked with:
+The installer downloads the latest release to `~/.local/bin` and checks that it
+has not been changed. Set `URSPACE_INSTALL_DIR` if you want another location.
 
-```bash
-gh attestation verify <archive> --repo EntasisLabs/urspace
-```
+On Windows, download the Windows zip from
+[GitHub Releases](https://github.com/EntasisLabs/urspace/releases).
 
 To build from source instead:
 
@@ -39,168 +84,121 @@ To build from source instead:
 cargo install --locked --path crates/urspace-host
 ```
 
-Share an app already listening on loopback:
+## Share an app
 
-```bash
-urspace serve localhost:8787
-```
-
-Urspace prints a signed, one-hour invitation under `urspace.online`. The
-recipient needs only a modern browser. The app stays on this machine, no inbound
-port is opened, and pressing Ctrl+C stops new traffic immediately. The hour is
-an admission window: browsers already connected remain authorized after it
-closes, while new connections are rejected. If the browser evicts the idle
-service worker, a still-open Urspace page restores the same admitted Iroh
-session from tab memory. After first admission, the browser retains a host-signed
-session grant and a separate proof key instead of the bearer capability; neither
-is written to browser storage.
-
-For a compact share URL, explicitly opt into encrypted shortening:
+First, start your app normally. If it is listening on `localhost:8787`, run:
 
 ```bash
 urspace serve localhost:8787 --short
 ```
 
-This prints a link shaped like `https://u.urspace.online/#s1=<secret>`. The CLI
-encrypts the complete signed invitation locally and uploads only the ciphertext.
-The secret remains in the URL fragment, is never included in the HTTP request,
-and decrypts the invitation in the recipient's browser. The short-link service
-can observe creation and retrieval metadata or deny service, but cannot read or
-forge the invitation. Shortening is limited to seven-day invitations and falls
-back to the direct URL if the optional service is unavailable.
+Urspace prints a compact `u.urspace.online` invitation. Keep the command
+running, send the link, and press Ctrl+C when you are finished.
 
-While sharing, the same terminal accepts live operator commands:
+Without `--short`, Urspace prints a longer link that works without the optional
+short-link service:
 
-- `invite` or `rotate` closes new admissions on the current link and prints a
-  fresh one; already-admitted browsers keep their sessions.
-- `raw` prints the current direct capability URL when shortening is enabled.
-- `sessions` lists admitted browser identities and connection state.
-- `kick <session>` or `kick all` immediately disconnects selected identities,
-  denies their automatic reconnects, closes the URL they know to newcomers, and
-  prints a fresh URL for future sharing.
+```bash
+urspace serve localhost:8787
+```
 
-Use a stable local identity name and tighter invitation limits when desired:
+You can also use a reusable local identity name, a shorter invitation window,
+and a one-person limit:
 
 ```bash
 urspace serve localhost:8787 --name boxclub --ttl 10m --max-sessions 1
 ```
 
-`--name` selects a persistent local signing identity. Every command invocation
-still creates a new random capability, invite ID, expiry, and session budget.
-Identity keys are stored in the platform-local application data directory under
-`urspace/sites` with private file permissions.
+The time limit controls how long **new** people may enter. Someone already
+admitted keeps their private session, including through refreshes and temporary
+connection drops, until one of these things happens:
 
-See [docs/cli.md](docs/cli.md) for the complete command contract.
+- they close every Urspace tab
+- they restart the browser or it completely discards the page from memory
+- you kick their session
+- you stop the Urspace host
 
-## What works
+While Urspace is running, type a command into the same terminal:
 
-- Static directories with confined GET/HEAD access
-- Loopback HTTP apps with GET, HEAD, POST, PUT, PATCH, DELETE, and OPTIONS
-- Same-origin browser `fetch` calls, including request bodies and response headers
-- Same-origin WebSockets through an injected standards-shaped browser shim
-- Vite/React bundles, client-side routes, and page-defined WebMCP tools
-- Automatic Iroh reconnection and service-worker recovery for admitted sessions
-- Expiring, revocable, session-limited invites
-- Optional end-to-end encrypted short links with direct-link fallback
+- `sessions` shows admitted browsers and whether they are connected.
+- `kick <session>` removes one browser and makes a fresh invitation.
+- `kick all` removes everyone and makes a fresh invitation.
+- `invite` or `rotate` stops new people from using the current invitation and
+  prints a new one. Already-admitted browsers stay connected.
+- `raw` prints the full invitation when you started with `--short`.
 
-The loopback proxy is intentionally limited to `http://127.0.0.1`,
-`http://[::1]`, or `http://localhost`. It will not proxy to LAN or Internet
-origins and does not follow upstream redirects.
+Treat an invitation like a temporary password: anyone who receives it can try to
+enter until it expires, reaches its session limit, or you rotate it.
 
-## BoxClub / StreetClanker
+See [the CLI guide](docs/cli.md) for every option.
 
-BoxClub is the first full-app acceptance target. Run its existing all-in-one
-production server; no BoxClub source changes are required.
+## Share a folder of static files
 
-For the local end-to-end setup, one command builds and runs BoxClub, the browser
-bootstrap, and the Iroh proxy until Ctrl+C:
+```bash
+urspace static ./public --entry-path /index.html
+```
+
+Urspace confines file access to that folder and serves the selected entry page.
+
+## What works today
+
+- Local HTTP apps, including common request methods and response headers
+- Same-site browser requests made with `fetch`
+- WebSockets used by apps and development tools
+- Vite and React apps, client-side routes, and WebMCP tools
+- Static folders
+- Automatic reconnects and ordinary page refreshes for admitted browsers
+- Expiring invitations, session limits, link rotation, and host-side kicking
+- Optional encrypted short links with automatic fallback to the full link
+
+For safety, the app proxy only connects to `127.0.0.1`, `::1`, or `localhost`.
+It will not forward requests to another machine on your LAN or to an internet
+address.
+
+## How it works, in plain English
+
+1. Urspace creates a hard-to-guess invitation for one app and signs it with the
+   host's identity.
+2. The browser checks that signature before it connects.
+3. The invitation secret is kept after the `#` in the URL, so it is not sent to
+   the web server that loads the opening page.
+4. The host verifies the invitation and gives that browser its own signed
+   session. The browser uses the session for refreshes and reconnects instead of
+   reusing the original invitation.
+5. Session credentials stay in browser memory. Closing every tab forgets them
+   and requires an invitation again.
+
+With a short link, the full invitation is encrypted on the host before its
+scrambled form is uploaded. The decryption secret stays after the `#` in the
+short URL. The short-link service can see that a record was created or fetched,
+but it cannot read or change the invitation.
+
+For the protocol details, see [session grants](docs/session-grants.md). For the
+security model and current limitations, read [SECURITY.md](SECURITY.md).
+
+## Developing Urspace
+
+BoxClub is the first full-app acceptance target. One script builds and runs
+BoxClub, the local browser-opening page, and the Urspace host until Ctrl+C:
 
 ```bash
 ./scripts/dev-boxclub.sh /path/to/boxclub
 ```
 
-The equivalent three-terminal setup is useful when debugging:
-
-```bash
-cd /path/to/boxclub
-npm run build
-NODE_ENV=production PORT=8787 npm start
-```
-
-Build and serve the generic bootstrap locally in another terminal:
-
-```bash
-cd /path/to/urspace/apps/bootstrap
-npm run build
-npm run serve
-```
-
-Then mint the invite and keep the proxy running:
-
-```bash
-cd /path/to/urspace
-cargo run -p urspace-host --bin urspace -- serve localhost:8787 \
-  --bootstrap-origin http://localhost:8080 \
-  --name boxclub \
-  --ttl 1h \
-  --max-sessions 4
-```
-
-Remove the local bootstrap override and add `--short` when sharing StreetClanker
-through the production `urspace.online` edge.
-
-Open the emitted URL in a browser. The capability fragment is removed before
-BoxClub code runs. Its frontend chunks, `/api/*` requests, `/ws` connection, and
-WebMCP HTTP fallback all traverse the authenticated Iroh connection.
-
-`localhost` is a same-machine development bootstrap. To share an invite with
-another device, deploy `apps/bootstrap/public` as immutable static files behind
-the `https://urspace.online` wildcard origin. It must route
-`https://<site-id>.urspace.online/.urspace/open/` and serve a wildcard TLS
-certificate. The bootstrap is generic and never receives the fragment over
-HTTP; fragments stay client-side.
-
-## Static sites
-
-```bash
-cargo run -p urspace-host --bin urspace -- static ./public \
-  --entry-path /index.html
-```
-
-The native diagnostic client uses the same invite verification and transport:
+To test the parts separately or deploy the browser-opening page, see
+[the bootstrap deployment guide](docs/bootstrap-deployment.md). The native
+diagnostic client can open an invitation without a browser:
 
 ```bash
 cargo run -p urspace-host --bin urspace -- get '<invite-url>' /index.html
 ```
 
-## Browser boundary
-
-The signed URL uses the reserved `/.urspace/open/` bootstrap path. A root-scoped
-service worker holds the authenticated Iroh client in memory and maps ordinary
-same-origin requests onto independent QUIC streams. It injects only the small
-WebSocket compatibility shim into HTML responses; application scripts otherwise
-run unchanged at the capability-derived site origin.
-
-Ordinary refreshes and idle service-worker restarts recover automatically while
-an Urspace page remains alive. The first trusted injected script keeps the
-host-signed grant and browser proof key in a closure and hands them back only to
-the exact-origin service worker. The original invitation capability is discarded
-after admission. Nothing is persisted to IndexedDB, Cache Storage, cookies, or
-web storage, so closing every page or restarting the browser still fails closed
-and requires the invitation again.
-
-See [docs/session-grants.md](docs/session-grants.md) for the v4 proof-of-possession
-protocol and reconnect transcript.
-
-See [SECURITY.md](SECURITY.md) before exposing a non-development bootstrap.
-The production container, wildcard DNS/TLS contract, verification steps, and
-operational rules are in [docs/bootstrap-deployment.md](docs/bootstrap-deployment.md).
-
 ## Contributing
 
-Bug reports and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md)
-for the security boundaries and local checks. Report suspected vulnerabilities
-privately as described in [SECURITY.md](SECURITY.md).
+Bug reports and pull requests are welcome. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) for the local checks and security boundaries.
+Report suspected vulnerabilities privately as described in
+[SECURITY.md](SECURITY.md).
 
 ## License
 
