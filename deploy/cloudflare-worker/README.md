@@ -34,7 +34,7 @@ npm run deploy
 After deployment:
 
 ```bash
-curl -i https://urspace.online/healthz
+curl -i https://<site-id>.urspace.online/healthz
 cargo run -p urspace-host --bin urspace -- serve http://127.0.0.1:8787
 ```
 
