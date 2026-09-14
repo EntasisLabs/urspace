@@ -28,6 +28,8 @@ pub enum ControlAction {
         max_sessions: Option<u32>,
         #[serde(default, skip_serializing_if = "is_false")]
         direct: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        tcp: bool,
     },
     Sessions,
     Kick {
@@ -451,6 +453,7 @@ mod tests {
                 access_label: None,
                 max_sessions: None,
                 direct: false,
+                tcp: false,
             }
         ));
 
@@ -460,12 +463,14 @@ mod tests {
                 access_label: Some("Alice / work laptop".into()),
                 max_sessions: Some(1),
                 direct: true,
+                tcp: true,
             },
         };
         let encoded = serde_json::to_string(&labeled).unwrap();
         assert!(encoded.contains("Alice / work laptop"));
         assert!(encoded.contains("\"max_sessions\":1"));
         assert!(encoded.contains("\"direct\":true"));
+        assert!(encoded.contains("\"tcp\":true"));
     }
 
     #[test]

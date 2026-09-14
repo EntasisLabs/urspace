@@ -159,6 +159,7 @@ urspace service start boxclub
 urspace service restart boxclub
 urspace service invite boxclub
 urspace service invite boxclub --for "Alice / work laptop"
+urspace service invite boxclub --for "Alice / work laptop" --tcp
 urspace service sessions boxclub
 urspace service kick boxclub <session-handle>
 urspace service kick-all boxclub
@@ -174,23 +175,25 @@ can verify the person while reusing the same host-side enrollment boundary.
 
 Management commands require a private control token stored with your Urspace
 data. Uninstalling removes automatic startup but deliberately preserves the site
-identity and browser access list. Windows can run named services in the
+identity and admitted-device list. Windows can run named services in the
 foreground but does not have automatic service installation yet.
 
 ## Connect a managed device without Cloudflare
 
-An employee or another managed machine can enroll the native client once:
+An employee or another managed machine can mount the private app on a local
+port. First create an explicitly TCP-enabled invitation on the host:
 
 ```bash
-urspace connect boxclub --invite-stdin
+urspace service invite boxclub --for "Alice / work laptop" --tcp
+# On Alice's device:
+urspace connect boxclub localhost:9090 --invite-stdin
 ```
 
-Paste the one-time invitation created with `service invite --for … --direct`.
-Urspace verifies it locally, saves a device-bound proof key in a private file,
-and prints an unguessable `http://….localhost` URL for the browser. HTTP and
-WebSocket traffic travels from that local gateway over the encrypted Iroh
-connection. The Cloudflare bootstrap, service worker, and short-link service are
-not involved.
+Anything Alice sends to `localhost:9090` now reaches only the loopback app saved
+in the host's `boxclub` service. Both applications behave as though they are
+talking locally while the bytes travel over the encrypted Iroh connection.
+`--tcp` implies a direct invitation: the Cloudflare bootstrap, service worker,
+and short-link service are not involved.
 
 On later runs, no invitation is needed:
 
@@ -198,12 +201,20 @@ On later runs, no invitation is needed:
 urspace connect boxclub
 ```
 
-The native device stays enrolled across browser and client restarts until the
-host kicks its session. Urspace also reuses the local port chosen during
-enrollment, preserving the site's browser cookies and storage. `--invite URL`
-is also available for automation, but
+The native device stays enrolled across client restarts until the host kicks its
+session, and Urspace remembers the local port selected during initial enrollment.
+This is raw TCP, so the same model can mount SSH, databases, development APIs,
+and other TCP services—not only websites. `--invite URL` is also available for
+automation, but
 `--invite-stdin` is preferred because it keeps the invitation out of shell
 history and the process list.
+
+For the origin-isolated browser gateway from the previous release, omit the
+local endpoint and use an invitation made with `--direct`:
+
+```bash
+urspace connect boxclub --invite-stdin
+```
 
 ## Share a folder of static files
 
@@ -222,6 +233,7 @@ Urspace confines file access to that folder and serves the selected entry page.
 - Static folders
 - Automatic reconnects and ordinary page refreshes for admitted browsers
 - Native managed-device connections that bypass the Cloudflare bootstrap
+- Explicitly authorized raw TCP mounts on client loopback ports
 - Expiring invitations, session limits, link rotation, and host-side kicking
 - Optional encrypted short links with automatic fallback to the full link
 

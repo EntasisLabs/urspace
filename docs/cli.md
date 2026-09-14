@@ -132,6 +132,7 @@ urspace service start boxclub
 urspace service restart boxclub
 urspace service invite boxclub
 urspace service invite boxclub --for "Alice / work laptop" --direct
+urspace service invite boxclub --for "Alice / work laptop" --tcp
 urspace service invite boxclub --for "QA team" --max-sessions 4
 urspace service sessions boxclub
 urspace service kick boxclub <session-handle>
@@ -167,23 +168,29 @@ implemented yet.
 
 ## Native device connection
 
-For a managed device, enroll once without executing the Cloudflare-hosted
-browser bootstrap:
+For a managed device, mount the host's saved loopback app on a client-side
+loopback port without executing the Cloudflare-hosted browser bootstrap:
 
 ```bash
-urspace service invite boxclub --for "Alice / work laptop" --direct
+urspace service invite boxclub --for "Alice / work laptop" --tcp
 # On Alice's device:
-urspace connect boxclub --invite-stdin
+urspace connect boxclub localhost:9090 --invite-stdin
 ```
 
-The second command reads the invitation from standard input, verifies it
+The host's `--tcp` flag is explicit authorization for raw TCP access and implies
+`--direct`. The client cannot choose or change the host-side target: every local
+connection goes only to the loopback endpoint saved when the named service was
+installed. The client reads the invitation from standard input, verifies it
 locally, creates a distinct device proof key, and stores the host-signed grant
 and private key below the local Urspace data directory. The file is created with
 mode `0600` on Unix, inherits the user data directory's ACL on Windows, and is
-never printed. Urspace then serves a local URL such
-as `http://<random>.localhost:<port>/`; the random hostname is checked on every
-request so unrelated local or browser traffic cannot select the gateway by port
-alone.
+never printed.
+
+While the command runs, software on Alice's machine can use `localhost:9090` as
+though the service were local. Each accepted TCP connection gets its own Iroh
+stream. The tunnel supports half-close behavior and carries bytes without
+parsing or rewriting them, so it works for HTTP, WebSockets, SSH, databases, and
+other TCP protocols. UDP is not supported.
 
 Reconnect later with:
 
@@ -193,11 +200,24 @@ urspace connect boxclub
 
 The saved grant is not a bearer credential: the host sends a fresh challenge and
 requires a signature from the saved device key. A host-side kick takes effect on
-native devices exactly as it does for browsers. HTTP methods and WebSockets are
-bridged over Iroh. The first enrollment selects and saves a free local port, so
-later runs restore the same browser origin and retain that site's cookies and
-storage. The gateway binds only to `127.0.0.1`; `--listen` can select another
-loopback port for an advanced one-off override, which changes the browser origin.
+native devices exactly as it does for browsers. The first TCP enrollment saves
+the selected local port, so later runs restore the same mount. Supplying a new
+`localhost:<port>` overrides the mount for that run. Raw mounts bind only to
+`127.0.0.1`, but any process on the client device may connect to that local port;
+use them only on a trusted device.
+
+The origin-isolated browser gateway remains available by omitting the positional
+endpoint and using an invitation made with `--direct`:
+
+```bash
+urspace connect boxclub --invite-stdin
+```
+
+That mode prints a random `http://<random>.localhost:<port>/` URL. The random
+hostname is checked on every request so unrelated browser traffic cannot select
+the gateway by port alone. Its first enrollment selects and saves a free local
+port, preserving the same browser origin, cookies, and storage on later runs.
+`--listen` is an advanced one-run port override for browser-gateway mode.
 
 For non-interactive automation, `--invite URL` is available. Prefer
 `--invite-stdin` for people because command arguments may be retained in shell

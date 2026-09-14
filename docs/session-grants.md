@@ -23,6 +23,9 @@ the signed grant, but cannot use it to enter the private site.
   been consumed.
 - Proofs are bound to the exact host, site, ALPN, signed grant, and current Iroh
   endpoint identity.
+- Raw TCP admission additionally requires host-side `allow_tcp` scope inherited
+  from an explicitly TCP-enabled invitation. A web-only session cannot resume on
+  the tunnel ALPN.
 - Invite rotation closes only new admissions. Previously admitted sessions may
   reconnect until kicked, revoked, forgotten by the host, or rejected by an
   explicitly configured session-expiry policy.
@@ -191,6 +194,13 @@ can therefore resume after all pages and the previous process are gone. It
 verifies the grant locally, creates a fresh Iroh transport endpoint, answers the
 host's fresh challenge, and exposes only a random `*.localhost` gateway to the
 browser. The Cloudflare bootstrap and service worker do not participate.
+
+For a raw port mount, authorization runs over `urspace-tunnel/1` and the proof
+signs that ALPN instead of `urspace-site/4`. After authorization, every Iroh
+bidirectional stream begins with `TunnelOpenV1 { version: 1 }`. The host responds
+with `Ready` only after opening the fixed loopback target from its service
+configuration; `Denied` is fail-closed. Remaining bytes are copied unchanged in
+both directions. No destination address crosses the wire.
 
 ## Required negative tests
 
