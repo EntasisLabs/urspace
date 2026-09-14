@@ -199,6 +199,21 @@ not yet use macOS Keychain, Windows Credential Manager, or Linux Secret Service.
 A later hardening pass should add those backends while retaining an explicit
 file-based mode for headless machines.
 
+Raw port mounts use the separate `urspace-tunnel/1` ALPN. The session proof
+binds that ALPN into its signed challenge transcript. A normal web invitation is
+not sufficient: the host must issue the enrollment with `service invite --tcp`,
+and that permission is journaled with the admitted session for future reconnects.
+The client never supplies a destination to the host. The host dials only the
+single numeric loopback endpoint already stored in the named service config.
+
+The client-side mount also binds only to `127.0.0.1`, but raw TCP has no HTTP Host
+header with which to isolate browser origins. Any local process—and potentially
+web content able to reach loopback—may attempt to use that port. A raw mount is
+therefore appropriate only on a trusted managed device. Applications should
+retain their own authentication when local software is outside the trust
+boundary. The origin-labeled browser gateway remains the safer default for an
+ordinary browser-only recipient.
+
 Owner-facing session listings expose only a separate random operator handle.
 It is generated independently rather than derived from the private session UUID.
 Raw session UUIDs and browser endpoint identities are not written to terminal or
@@ -229,6 +244,8 @@ kick; the handle itself grants no access.
 - The browser and loopback proxy buffer each HTTP response up to 64 MiB. Streaming
   responses, SSE, uploads larger than 16 MiB, and stricter content-specific
   limits are not yet supported.
+- Raw port mounts support TCP only. UDP forwarding and Unix-domain socket mounts
+  are not implemented.
 - Browser Iroh endpoints are relay-only under current Web platform constraints.
 - A short link adds a centralized first-open availability dependency. If the
   resolver is unavailable, recipients need the direct invitation printed by the

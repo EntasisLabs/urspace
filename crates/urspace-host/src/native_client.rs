@@ -14,8 +14,9 @@ use tokio::sync::Mutex;
 use urspace_protocol::{
     ALPN, ClientAuthV4, ClientProofV4, Header, INVITE_VERSION, RequestMethod,
     SESSION_PROOF_VERSION, ServerAuthV4, ServerHelloV4, SessionGrantPayload, SessionProofPayload,
-    SessionProofPurpose, SiteRequest, SiteResponseHead, SocketMessage, read_frame,
-    session_grant_hash, sign_session_proof, verify_invite_url, verify_session_grant, write_frame,
+    SessionProofPurpose, SiteRequest, SiteResponseHead, SocketMessage, TUNNEL_ALPN, TUNNEL_VERSION,
+    TunnelOpenV1, TunnelStatusV1, read_frame, session_grant_hash, sign_session_proof,
+    verify_invite_url, verify_session_grant, write_frame,
 };
 use zeroize::{Zeroize as _, Zeroizing};
 
@@ -33,6 +34,25 @@ struct StoredSession {
     session_secret: String,
     local_origin_label: String,
     local_port: u16,
+    #[serde(default)]
+    transport: NativeTransport,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeTransport {
+    #[default]
+    Web,
+    Tcp,
+}
+
+impl NativeTransport {
+    fn alpn(self) -> &'static [u8] {
+        match self {
+            Self::Web => ALPN,
+            Self::Tcp => TUNNEL_ALPN,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -58,6 +78,7 @@ pub struct NativeSiteClient {
     site_id: String,
     local_origin_label: String,
     local_port: u16,
+    transport: NativeTransport,
 }
 
 impl Drop for NativeSiteClient {
@@ -71,6 +92,7 @@ impl NativeSiteClient {
         invitation_url: &str,
         session_path: PathBuf,
         local_port: u16,
+        transport: NativeTransport,
         now_unix: i64,
     ) -> Result<Self> {
         let mut invite = verify_invite_url(invitation_url, now_unix)
@@ -92,6 +114,7 @@ impl NativeSiteClient {
             authorization,
             &session_key,
             None,
+            transport.alpn(),
             now_unix,
         )
         .await?;
@@ -103,6 +126,7 @@ impl NativeSiteClient {
             &session_key_bytes,
             &local_origin_label,
             local_port,
+            transport,
         )?;
         Ok(Self::new(
             endpoint,
@@ -113,11 +137,31 @@ impl NativeSiteClient {
             grant,
             local_origin_label,
             local_port,
+            transport,
         ))
     }
 
     pub async fn resume(session_path: PathBuf, now_unix: i64) -> Result<Self> {
+        Self::resume_inner(session_path, None, now_unix).await
+    }
+
+    pub async fn resume_tcp(session_path: PathBuf, local_port: u16, now_unix: i64) -> Result<Self> {
+        Self::resume_inner(
+            session_path,
+            Some((NativeTransport::Tcp, local_port)),
+            now_unix,
+        )
+        .await
+    }
+
+    async fn resume_inner(
+        session_path: PathBuf,
+        transport_override: Option<(NativeTransport, u16)>,
+        now_unix: i64,
+    ) -> Result<Self> {
         let mut stored = load_session(&session_path)?;
+        let (transport, local_port) =
+            transport_override.unwrap_or((stored.transport, stored.local_port));
         let secret = decode_secret(&stored.session_secret);
         stored.session_secret.zeroize();
         let secret = secret?;
@@ -138,6 +182,7 @@ impl NativeSiteClient {
             authorization,
             &session_key,
             Some((&stored.session_grant, &prior_grant)),
+            transport.alpn(),
             now_unix,
         )
         .await?;
@@ -150,7 +195,8 @@ impl NativeSiteClient {
             secret,
             grant,
             stored.local_origin_label,
-            stored.local_port,
+            local_port,
+            transport,
         ))
     }
 
@@ -164,6 +210,7 @@ impl NativeSiteClient {
         grant: SessionGrantPayload,
         local_origin_label: String,
         local_port: u16,
+        transport: NativeTransport,
     ) -> Self {
         Self {
             endpoint,
@@ -175,6 +222,7 @@ impl NativeSiteClient {
             site_id: grant.site_id,
             local_origin_label,
             local_port,
+            transport,
         }
     }
 
@@ -194,6 +242,10 @@ impl NativeSiteClient {
         self.local_port
     }
 
+    pub fn transport(&self) -> NativeTransport {
+        self.transport
+    }
+
     pub async fn fetch(
         &self,
         method: RequestMethod,
@@ -201,6 +253,9 @@ impl NativeSiteClient {
         headers: Vec<Header>,
         body: Vec<u8>,
     ) -> Result<NativeResponse> {
+        if self.transport != NativeTransport::Web {
+            bail!("this Urspace connection is mounted as a raw TCP endpoint");
+        }
         if body.len() > MAX_REQUEST_BODY_BYTES {
             bail!("request body exceeds the native client limit");
         }
@@ -236,6 +291,9 @@ impl NativeSiteClient {
     }
 
     pub async fn open_socket(&self, path: String) -> Result<NativeSocket> {
+        if self.transport != NativeTransport::Web {
+            bail!("this Urspace connection is mounted as a raw TCP endpoint");
+        }
         let (mut send, mut recv) = self.open_stream().await?;
         write_frame(
             &mut send,
@@ -258,6 +316,28 @@ impl NativeSiteClient {
             );
         }
         Ok(NativeSocket { send, recv })
+    }
+
+    pub async fn open_tunnel(&self) -> Result<NativeSocket> {
+        if self.transport != NativeTransport::Tcp {
+            bail!("this Urspace connection is using the browser gateway");
+        }
+        let (mut send, mut recv) = self.open_stream().await?;
+        write_frame(
+            &mut send,
+            &TunnelOpenV1 {
+                version: TUNNEL_VERSION,
+            },
+        )
+        .await
+        .context("open private TCP tunnel")?;
+        match read_frame(&mut recv)
+            .await
+            .context("read private TCP tunnel status")?
+        {
+            TunnelStatusV1::Ready => Ok(NativeSocket { send, recv }),
+            TunnelStatusV1::Denied => bail!("private site denied the TCP tunnel"),
+        }
     }
 
     async fn open_stream(
@@ -286,6 +366,7 @@ impl NativeSiteClient {
             },
             &session_key,
             Some((&session_grant, &prior)),
+            self.transport.alpn(),
             0,
         )
         .await?;
@@ -330,11 +411,12 @@ async fn authorize(
     mut authorization: ClientAuthV4,
     session_key: &SecretKey,
     resume: Option<(&str, &SessionGrantPayload)>,
+    alpn: &[u8],
     now_unix: i64,
 ) -> Result<(iroh::endpoint::Connection, String, SessionGrantPayload)> {
     let connection = tokio::time::timeout(
         CONNECT_TIMEOUT,
-        endpoint.connect(endpoint_addr.clone(), ALPN),
+        endpoint.connect(endpoint_addr.clone(), alpn),
     )
     .await
     .context("timed out reaching the private site")?
@@ -379,7 +461,7 @@ async fn authorize(
             purpose,
             host_id: *endpoint_addr.id.as_bytes(),
             site_id: endpoint_addr.id.to_z32(),
-            alpn: ALPN.to_vec(),
+            alpn: alpn.to_vec(),
             session_id: challenge.session_id,
             session_grant_hash: grant_hash,
             endpoint_id: *endpoint.id().as_bytes(),
@@ -479,6 +561,7 @@ fn save_session(
     session_key: &[u8; 32],
     local_origin_label: &str,
     local_port: u16,
+    transport: NativeTransport,
 ) -> Result<()> {
     let mut stored = StoredSession {
         version: SESSION_FILE_VERSION,
@@ -486,6 +569,7 @@ fn save_session(
         session_secret: URL_SAFE_NO_PAD.encode(session_key),
         local_origin_label: local_origin_label.to_owned(),
         local_port,
+        transport,
     };
     let encoded = serde_json::to_vec(&stored).context("encode saved Urspace device");
     stored.session_secret.zeroize();
@@ -552,7 +636,10 @@ pub async fn receive_socket_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CapabilityRegistry, SessionGrantIssuer, SiteProtocol, StaticSite, unix_now};
+    use crate::{
+        CapabilityRegistry, LoopbackSite, SessionGrantIssuer, SiteProtocol, StaticSite,
+        TunnelProtocol, unix_now,
+    };
     use iroh::protocol::Router;
     use urspace_protocol::{InviteGrant, invite_url, sign_invite};
     use uuid::Uuid;
@@ -567,6 +654,7 @@ mod tests {
             &[7_u8; 32],
             "0123456789abcdef0123456789abcdef",
             43210,
+            NativeTransport::Web,
         )
         .unwrap();
         assert!(
@@ -576,6 +664,7 @@ mod tests {
                 &[8_u8; 32],
                 "0123456789abcdef0123456789abcdef",
                 43210,
+                NativeTransport::Web,
             )
             .is_err()
         );
@@ -598,6 +687,7 @@ mod tests {
             session_secret: URL_SAFE_NO_PAD.encode([0_u8; 32]),
             local_origin_label: "0123456789abcdef0123456789abcdef".into(),
             local_port: 43210,
+            transport: NativeTransport::Web,
         };
         std::fs::write(&path, serde_json::to_vec(&malformed).unwrap()).unwrap();
         assert!(load_session(&path).is_err());
@@ -653,10 +743,15 @@ mod tests {
         .unwrap();
         let invitation = invite_url(&encoded).unwrap();
 
-        let client =
-            NativeSiteClient::enroll(invitation.as_str(), session_path.clone(), 43210, unix_now())
-                .await
-                .unwrap();
+        let client = NativeSiteClient::enroll(
+            invitation.as_str(),
+            session_path.clone(),
+            43210,
+            NativeTransport::Web,
+            unix_now(),
+        )
+        .await
+        .unwrap();
         let response = client
             .fetch(
                 RequestMethod::Get,
@@ -692,5 +787,125 @@ mod tests {
 
         drop(resumed);
         router.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_mount_forwards_raw_bytes_and_resumes_without_the_invite() {
+        let directory = tempfile::tempdir().unwrap();
+        let session_path = directory.path().join("tcp-device.json");
+        let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = upstream.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut bytes = Vec::new();
+                    tokio::io::AsyncReadExt::read_to_end(&mut socket, &mut bytes)
+                        .await
+                        .unwrap();
+                    tokio::io::AsyncWriteExt::write_all(&mut socket, &bytes)
+                        .await
+                        .unwrap();
+                    tokio::io::AsyncWriteExt::shutdown(&mut socket)
+                        .await
+                        .unwrap();
+                });
+            }
+        });
+
+        let identity = SecretKey::generate();
+        let server = Endpoint::builder(presets::Minimal)
+            .secret_key(identity.clone())
+            .bind()
+            .await
+            .unwrap();
+        let endpoint_ticket = EndpointTicket::new(server.addr()).to_string();
+        let invite_id = Uuid::new_v4();
+        let capability = [72_u8; 32];
+        let registry = CapabilityRegistry::default();
+        registry
+            .insert_for_tcp(invite_id, &capability, unix_now() + 60, 1, None)
+            .unwrap();
+        let issuer = SessionGrantIssuer::new(
+            identity.clone(),
+            "https://sites.example".into(),
+            endpoint_ticket.clone(),
+            "/".into(),
+        );
+        let protocol = TunnelProtocol::new(
+            registry,
+            LoopbackSite::open(&format!("http://{upstream_address}")).unwrap(),
+            issuer,
+        );
+        let router = Router::builder(server)
+            .accept(TUNNEL_ALPN, protocol)
+            .spawn();
+        let encoded = sign_invite(
+            &identity,
+            InviteGrant {
+                bootstrap_origin: "https://sites.example".into(),
+                endpoint_ticket,
+                invite_id,
+                capability,
+                expires_at_unix: unix_now() + 60,
+                entry_path: "/".into(),
+                max_sessions: 1,
+            },
+        )
+        .unwrap();
+        let invitation = invite_url(&encoded).unwrap();
+
+        let client = NativeSiteClient::enroll(
+            invitation.as_str(),
+            session_path.clone(),
+            49090,
+            NativeTransport::Tcp,
+            unix_now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(client.transport(), NativeTransport::Tcp);
+        let (mut invalid_send, mut invalid_recv) = client.open_stream().await.unwrap();
+        write_frame(
+            &mut invalid_send,
+            &TunnelOpenV1 {
+                version: TUNNEL_VERSION + 1,
+            },
+        )
+        .await
+        .unwrap();
+        invalid_send.finish().unwrap();
+        let invalid_status: TunnelStatusV1 = read_frame(&mut invalid_recv).await.unwrap();
+        assert_eq!(invalid_status, TunnelStatusV1::Denied);
+        assert_eq!(
+            tcp_round_trip(&client, b"first tunnel").await,
+            b"first tunnel"
+        );
+        drop(client);
+
+        let resumed = NativeSiteClient::resume(session_path, unix_now())
+            .await
+            .unwrap();
+        assert_eq!(resumed.transport(), NativeTransport::Tcp);
+        assert_eq!(resumed.local_port(), 49090);
+        assert_eq!(
+            tcp_round_trip(&resumed, b"resumed tunnel").await,
+            b"resumed tunnel"
+        );
+
+        drop(resumed);
+        upstream_task.await.unwrap();
+        router.shutdown().await.unwrap();
+    }
+
+    async fn tcp_round_trip(client: &NativeSiteClient, payload: &[u8]) -> Vec<u8> {
+        let mut tunnel = client.open_tunnel().await.unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut tunnel.send, payload)
+            .await
+            .unwrap();
+        tunnel.send.finish().unwrap();
+        tunnel.recv.read_to_end(1024).await.unwrap()
     }
 }

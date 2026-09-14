@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{BufRead as _, BufReader, Write as _};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,15 +18,16 @@ use rand::Rng as _;
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq as _;
+use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 use urspace_protocol::{
     ALPN, ClientAuthV4, ClientProofV4, DenialCode, Header, RequestMethod, ServerAuthV4,
     ServerHelloV4, SessionChallengeV4, SessionGrantIssue, SessionGrantPayload, SessionProofPayload,
-    SessionProofPurpose, SiteRequest, SiteResponseHead, SocketMessage, read_frame,
-    session_grant_hash, sign_session_grant, verify_session_grant, verify_session_proof,
-    write_frame,
+    SessionProofPurpose, SiteRequest, SiteResponseHead, SocketMessage, TUNNEL_ALPN, TUNNEL_VERSION,
+    TunnelOpenV1, TunnelStatusV1, read_frame, session_grant_hash, sign_session_grant,
+    verify_session_grant, verify_session_proof, write_frame,
 };
 use uuid::Uuid;
 
@@ -91,6 +93,8 @@ enum RegistryEvent {
         capability_hash: [u8; 32],
         expires_at_unix: i64,
         max_sessions: u32,
+        #[serde(default)]
+        allow_tcp: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         access_label: Option<String>,
     },
@@ -140,6 +144,7 @@ struct InviteRecord {
     capability_hash: [u8; 32],
     expires_at_unix: i64,
     remaining_sessions: u32,
+    allow_tcp: bool,
     access_label: Option<String>,
     admitted_sessions: HashSet<Uuid>,
     admissions_closed: bool,
@@ -153,6 +158,7 @@ struct SessionRecord {
     authorization_epoch: u64,
     endpoint_id: EndpointId,
     operator_handle: [u8; 8],
+    allow_tcp: bool,
     kicked: bool,
 }
 
@@ -182,6 +188,13 @@ pub struct SessionInfo {
 pub struct AuthorizedSession {
     session_id: Uuid,
     invite_id: Uuid,
+    endpoint_id: EndpointId,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NewSession {
+    session_id: Uuid,
+    session_public_key: [u8; 32],
     endpoint_id: EndpointId,
 }
 
@@ -256,11 +269,49 @@ impl CapabilityRegistry {
         max_sessions: u32,
         access_label: Option<String>,
     ) -> Result<(), RegistryError> {
+        self.insert_for_access(
+            invite_id,
+            capability,
+            expires_at_unix,
+            max_sessions,
+            access_label,
+            false,
+        )
+    }
+
+    pub fn insert_for_tcp(
+        &self,
+        invite_id: Uuid,
+        capability: &[u8; 32],
+        expires_at_unix: i64,
+        max_sessions: u32,
+        access_label: Option<String>,
+    ) -> Result<(), RegistryError> {
+        self.insert_for_access(
+            invite_id,
+            capability,
+            expires_at_unix,
+            max_sessions,
+            access_label,
+            true,
+        )
+    }
+
+    fn insert_for_access(
+        &self,
+        invite_id: Uuid,
+        capability: &[u8; 32],
+        expires_at_unix: i64,
+        max_sessions: u32,
+        access_label: Option<String>,
+        allow_tcp: bool,
+    ) -> Result<(), RegistryError> {
         let event = RegistryEvent::InviteInserted {
             invite_id,
             capability_hash: capability_hash(capability),
             expires_at_unix,
             max_sessions,
+            allow_tcp,
             access_label,
         };
         let mut guard = self.inner.lock().expect("capability registry poisoned");
@@ -299,6 +350,22 @@ impl CapabilityRegistry {
         Ok(())
     }
 
+    pub fn can_admit_tcp(
+        &self,
+        invite_id: Uuid,
+        capability: &[u8; 32],
+        now_unix: i64,
+    ) -> Result<(), DenialCode> {
+        self.can_admit(invite_id, capability, now_unix)?;
+        let guard = self.inner.lock().expect("capability registry poisoned");
+        guard
+            .invites
+            .get(&invite_id)
+            .filter(|record| record.allow_tcp)
+            .map(|_| ())
+            .ok_or(DenialCode::Invalid)
+    }
+
     pub fn admit(
         &self,
         invite_id: Uuid,
@@ -311,14 +378,17 @@ impl CapabilityRegistry {
         self.can_admit_locked(
             invite_id,
             capability,
-            session_id,
-            session_public_key,
-            endpoint_id,
+            NewSession {
+                session_id,
+                session_public_key,
+                endpoint_id,
+            },
             now_unix,
+            false,
         )
     }
 
-    fn can_admit_locked(
+    pub fn admit_tcp(
         &self,
         invite_id: Uuid,
         capability: &[u8; 32],
@@ -327,13 +397,37 @@ impl CapabilityRegistry {
         endpoint_id: EndpointId,
         now_unix: i64,
     ) -> Result<AuthorizedSession, RegistryError> {
+        self.can_admit_locked(
+            invite_id,
+            capability,
+            NewSession {
+                session_id,
+                session_public_key,
+                endpoint_id,
+            },
+            now_unix,
+            true,
+        )
+    }
+
+    fn can_admit_locked(
+        &self,
+        invite_id: Uuid,
+        capability: &[u8; 32],
+        session: NewSession,
+        now_unix: i64,
+        require_tcp: bool,
+    ) -> Result<AuthorizedSession, RegistryError> {
         let candidate_hash = capability_hash(capability);
         let mut guard = self.inner.lock().expect("capability registry poisoned");
-        if guard.sessions.contains_key(&session_id) {
+        if guard.sessions.contains_key(&session.session_id) {
             return Err(DenialCode::Invalid.into());
         }
         let record = guard.invites.get(&invite_id).ok_or(DenialCode::Invalid)?;
         if record.capability_hash.ct_eq(&candidate_hash).unwrap_u8() != 1 {
+            return Err(DenialCode::Invalid.into());
+        }
+        if require_tcp && !record.allow_tcp {
             return Err(DenialCode::Invalid.into());
         }
         if record.revoked || record.admissions_closed {
@@ -347,17 +441,17 @@ impl CapabilityRegistry {
         }
         let event = RegistryEvent::SessionAdmitted {
             invite_id,
-            session_id,
-            session_public_key,
-            endpoint_id: *endpoint_id.as_bytes(),
+            session_id: session.session_id,
+            session_public_key: session.session_public_key,
+            endpoint_id: *session.endpoint_id.as_bytes(),
             operator_handle: Some(random_operator_handle(&guard)),
         };
         self.append_event(&event)?;
         apply_registry_event(&mut guard, event)?;
         Ok(AuthorizedSession {
-            session_id,
+            session_id: session.session_id,
             invite_id,
-            endpoint_id,
+            endpoint_id: session.endpoint_id,
         })
     }
 
@@ -367,6 +461,15 @@ impl CapabilityRegistry {
     ) -> Result<(), DenialCode> {
         let guard = self.inner.lock().expect("capability registry poisoned");
         validate_grant_record(&guard, grant).map(|_| ())
+    }
+
+    pub fn can_resume_tcp(
+        &self,
+        grant: &urspace_protocol::SessionGrantPayload,
+    ) -> Result<(), DenialCode> {
+        let guard = self.inner.lock().expect("capability registry poisoned");
+        validate_grant_record(&guard, grant)
+            .and_then(|record| record.allow_tcp.then_some(()).ok_or(DenialCode::Invalid))
     }
 
     pub fn resume(
@@ -760,6 +863,7 @@ fn apply_registry_event(
             capability_hash,
             expires_at_unix,
             max_sessions,
+            allow_tcp,
             access_label,
         } => {
             if max_sessions == 0 || state.invites.contains_key(&invite_id) {
@@ -771,6 +875,7 @@ fn apply_registry_event(
                     capability_hash,
                     expires_at_unix,
                     remaining_sessions: max_sessions,
+                    allow_tcp,
                     access_label,
                     admitted_sessions: HashSet::new(),
                     admissions_closed: false,
@@ -819,6 +924,7 @@ fn apply_registry_event(
                 return Err(invalid_registry_event());
             }
             invite.remaining_sessions -= 1;
+            let allow_tcp = invite.allow_tcp;
             invite.admitted_sessions.insert(session_id);
             state.sessions.insert(
                 session_id,
@@ -828,6 +934,7 @@ fn apply_registry_event(
                     authorization_epoch: 0,
                     endpoint_id,
                     operator_handle,
+                    allow_tcp,
                     kicked: false,
                 },
             );
@@ -982,6 +1089,7 @@ pub struct StaticSite {
 pub struct LoopbackSite {
     http_origin: Url,
     ws_origin: Url,
+    tcp_address: SocketAddr,
     client: reqwest::Client,
 }
 
@@ -1007,6 +1115,16 @@ impl LoopbackSite {
                 .map_err(|_| anyhow::anyhow!("could not normalize loopback upstream"))?;
         }
         http_origin.set_path("/");
+        let tcp_address = SocketAddr::new(
+            http_origin
+                .host_str()
+                .map(|host| host.trim_matches(['[', ']']))
+                .and_then(|host| host.parse::<IpAddr>().ok())
+                .context("loopback upstream must resolve to a numeric address")?,
+            http_origin
+                .port_or_known_default()
+                .context("loopback upstream must have a port")?,
+        );
         let mut ws_origin = http_origin.clone();
         ws_origin
             .set_scheme("ws")
@@ -1018,6 +1136,7 @@ impl LoopbackSite {
         Ok(Self {
             http_origin,
             ws_origin,
+            tcp_address,
             client,
         })
     }
@@ -1030,7 +1149,7 @@ impl LoopbackSite {
 #[derive(Debug, Clone)]
 enum SiteSource {
     Static(StaticSite),
-    Loopback(LoopbackSite),
+    Loopback(Box<LoopbackSite>),
 }
 
 impl StaticSite {
@@ -1114,6 +1233,12 @@ pub struct SiteProtocol {
 }
 
 #[derive(Debug, Clone)]
+pub struct TunnelProtocol {
+    authorization: SiteProtocol,
+    site: LoopbackSite,
+}
+
+#[derive(Debug, Clone)]
 pub struct SessionGrantIssuer {
     identity: SecretKey,
     bootstrap_origin: String,
@@ -1153,7 +1278,7 @@ impl SiteProtocol {
     ) -> Self {
         Self {
             registry,
-            source: SiteSource::Loopback(site),
+            source: SiteSource::Loopback(Box::new(site)),
             issuer,
         }
     }
@@ -1169,6 +1294,36 @@ impl ProtocolHandler for SiteProtocol {
 
 impl SiteProtocol {
     async fn serve_connection(&self, connection: Connection) -> Result<()> {
+        let Some(session) = self.authorize_connection(&connection, ALPN, false).await? else {
+            return Ok(());
+        };
+        let stable_id = connection.stable_id();
+        self.registry.session_connected(session, connection.clone());
+        let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS_PER_CONNECTION));
+        loop {
+            let Ok((send, recv)) = connection.accept_bi().await else {
+                break;
+            };
+            let Ok(permit) = Arc::clone(&limit).acquire_owned().await else {
+                break;
+            };
+            let registry = self.registry.clone();
+            let source = self.source.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                let _ = serve_request(registry, source, session, send, recv).await;
+            });
+        }
+        self.registry.session_disconnected(session, stable_id);
+        Ok(())
+    }
+
+    async fn authorize_connection(
+        &self,
+        connection: &Connection,
+        alpn: &[u8],
+        require_tcp: bool,
+    ) -> Result<Option<AuthorizedSession>> {
         let (mut hello_send, mut hello_recv) = connection
             .accept_bi()
             .await
@@ -1177,7 +1332,7 @@ impl SiteProtocol {
             .await
             .context("read client authorization")?;
         let now = unix_now();
-        let pending = match self.prepare_authorization(hello, now) {
+        let pending = match self.prepare_authorization(hello, now, require_tcp) {
             Ok(pending) => pending,
             Err(code) => {
                 write_frame(&mut hello_send, &ServerAuthV4::Denied { code })
@@ -1185,7 +1340,7 @@ impl SiteProtocol {
                     .context("write authorization denial")?;
                 hello_send.finish().context("finish authorization denial")?;
                 let _ = tokio::time::timeout(Duration::from_secs(1), hello_send.stopped()).await;
-                return Ok(());
+                return Ok(None);
             }
         };
         let challenge = SessionChallengeV4 {
@@ -1200,7 +1355,7 @@ impl SiteProtocol {
         let proof: ClientProofV4 = read_frame(&mut hello_recv)
             .await
             .context("read session proof")?;
-        let proof_payload = pending.proof_payload(&self.issuer, &connection, &challenge);
+        let proof_payload = pending.proof_payload(&self.issuer, connection, &challenge, alpn);
         let proof_valid = verify_session_proof(
             pending.session_public_key(),
             &proof_payload,
@@ -1209,7 +1364,12 @@ impl SiteProtocol {
         )
         .is_ok();
         let authorization = if proof_valid {
-            pending.finalize(&self.registry, connection.remote_id(), unix_now())
+            pending.finalize(
+                &self.registry,
+                connection.remote_id(),
+                unix_now(),
+                require_tcp,
+            )
         } else {
             Err(RegistryError::Denied(DenialCode::Invalid))
         };
@@ -1244,34 +1404,16 @@ impl SiteProtocol {
             .context("finish authorization response")?;
         let Some(session) = granted_session else {
             let _ = tokio::time::timeout(Duration::from_secs(1), hello_send.stopped()).await;
-            return Ok(());
+            return Ok(None);
         };
-
-        let stable_id = connection.stable_id();
-        self.registry.session_connected(session, connection.clone());
-        let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS_PER_CONNECTION));
-        loop {
-            let Ok((send, recv)) = connection.accept_bi().await else {
-                break;
-            };
-            let Ok(permit) = Arc::clone(&limit).acquire_owned().await else {
-                break;
-            };
-            let registry = self.registry.clone();
-            let source = self.source.clone();
-            tokio::spawn(async move {
-                let _permit = permit;
-                let _ = serve_request(registry, source, session, send, recv).await;
-            });
-        }
-        self.registry.session_disconnected(session, stable_id);
-        Ok(())
+        Ok(Some(session))
     }
 
     fn prepare_authorization(
         &self,
         hello: ClientAuthV4,
         now_unix: i64,
+        require_tcp: bool,
     ) -> Result<PendingAuthorization, DenialCode> {
         match hello {
             ClientAuthV4::Admit {
@@ -1281,7 +1423,12 @@ impl SiteProtocol {
             } => {
                 iroh::PublicKey::from_bytes(&session_public_key)
                     .map_err(|_| DenialCode::Invalid)?;
-                self.registry.can_admit(invite_id, &capability, now_unix)?;
+                if require_tcp {
+                    self.registry
+                        .can_admit_tcp(invite_id, &capability, now_unix)?;
+                } else {
+                    self.registry.can_admit(invite_id, &capability, now_unix)?;
+                }
                 Ok(PendingAuthorization::Admit {
                     invite_id,
                     capability,
@@ -1299,7 +1446,11 @@ impl SiteProtocol {
                 {
                     return Err(DenialCode::Invalid);
                 }
-                self.registry.can_resume(&grant)?;
+                if require_tcp {
+                    self.registry.can_resume_tcp(&grant)?;
+                } else {
+                    self.registry.can_resume(&grant)?;
+                }
                 Ok(PendingAuthorization::Resume {
                     session_grant,
                     grant,
@@ -1330,6 +1481,100 @@ impl SiteProtocol {
             },
         )
     }
+}
+
+impl TunnelProtocol {
+    pub fn new(
+        registry: CapabilityRegistry,
+        site: LoopbackSite,
+        issuer: SessionGrantIssuer,
+    ) -> Self {
+        Self {
+            authorization: SiteProtocol::loopback(registry, site.clone(), issuer),
+            site,
+        }
+    }
+
+    async fn serve_connection(&self, connection: Connection) -> Result<()> {
+        let Some(session) = self
+            .authorization
+            .authorize_connection(&connection, TUNNEL_ALPN, true)
+            .await?
+        else {
+            return Ok(());
+        };
+        let stable_id = connection.stable_id();
+        self.authorization
+            .registry
+            .session_connected(session, connection.clone());
+        let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS_PER_CONNECTION));
+        loop {
+            let Ok((send, recv)) = connection.accept_bi().await else {
+                break;
+            };
+            let Ok(permit) = Arc::clone(&limit).acquire_owned().await else {
+                break;
+            };
+            let registry = self.authorization.registry.clone();
+            let site = self.site.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                let _ = serve_tcp_tunnel(registry, site, session, send, recv).await;
+            });
+        }
+        self.authorization
+            .registry
+            .session_disconnected(session, stable_id);
+        Ok(())
+    }
+}
+
+impl ProtocolHandler for TunnelProtocol {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        self.serve_connection(connection)
+            .await
+            .map_err(|error| AcceptError::from_err(io::Error::other(error.to_string())))
+    }
+}
+
+async fn serve_tcp_tunnel(
+    registry: CapabilityRegistry,
+    site: LoopbackSite,
+    session: AuthorizedSession,
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+) -> Result<()> {
+    if !registry.session_is_active(session) {
+        write_frame(&mut send, &TunnelStatusV1::Denied).await?;
+        send.finish()?;
+        return Ok(());
+    }
+    let request: TunnelOpenV1 = read_frame(&mut recv).await.context("read tunnel request")?;
+    if request.version != TUNNEL_VERSION {
+        write_frame(&mut send, &TunnelStatusV1::Denied).await?;
+        send.finish()?;
+        return Ok(());
+    }
+    let upstream = match TcpStream::connect(site.tcp_address).await {
+        Ok(upstream) => upstream,
+        Err(_) => {
+            write_frame(&mut send, &TunnelStatusV1::Denied).await?;
+            send.finish()?;
+            return Ok(());
+        }
+    };
+    write_frame(&mut send, &TunnelStatusV1::Ready).await?;
+    let (mut upstream_read, mut upstream_write) = upstream.into_split();
+    let upload = async {
+        tokio::io::copy(&mut recv, &mut upstream_write).await?;
+        tokio::io::AsyncWriteExt::shutdown(&mut upstream_write).await
+    };
+    let download = async {
+        tokio::io::copy(&mut upstream_read, &mut send).await?;
+        send.finish().map_err(io::Error::other)
+    };
+    tokio::try_join!(upload, download)?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1382,6 +1627,7 @@ impl PendingAuthorization {
         issuer: &SessionGrantIssuer,
         connection: &Connection,
         challenge: &SessionChallengeV4,
+        alpn: &[u8],
     ) -> SessionProofPayload {
         SessionProofPayload {
             version: urspace_protocol::SESSION_PROOF_VERSION,
@@ -1391,7 +1637,7 @@ impl PendingAuthorization {
             },
             host_id: *issuer.identity.public().as_bytes(),
             site_id: issuer.identity.public().to_z32(),
-            alpn: ALPN.to_vec(),
+            alpn: alpn.to_vec(),
             session_id: challenge.session_id,
             session_grant_hash: match self {
                 Self::Admit { .. } => [0_u8; 32],
@@ -1409,6 +1655,7 @@ impl PendingAuthorization {
         registry: &CapabilityRegistry,
         endpoint_id: EndpointId,
         now_unix: i64,
+        require_tcp: bool,
     ) -> Result<AuthorizedSession, RegistryError> {
         match self {
             Self::Admit {
@@ -1416,14 +1663,27 @@ impl PendingAuthorization {
                 capability,
                 session_id,
                 session_public_key,
-            } => registry.admit(
-                *invite_id,
-                capability,
-                *session_id,
-                *session_public_key,
-                endpoint_id,
-                now_unix,
-            ),
+            } => {
+                if require_tcp {
+                    registry.admit_tcp(
+                        *invite_id,
+                        capability,
+                        *session_id,
+                        *session_public_key,
+                        endpoint_id,
+                        now_unix,
+                    )
+                } else {
+                    registry.admit(
+                        *invite_id,
+                        capability,
+                        *session_id,
+                        *session_public_key,
+                        endpoint_id,
+                        now_unix,
+                    )
+                }
+            }
             Self::Resume { grant, .. } => registry.resume(grant, endpoint_id),
         }
     }
@@ -1452,9 +1712,9 @@ async fn serve_request(
     match source {
         SiteSource::Static(site) => serve_static_request(site, request, send).await,
         SiteSource::Loopback(site) if request.method == RequestMethod::WebSocket => {
-            serve_loopback_socket(registry, session, site, request, send, recv).await
+            serve_loopback_socket(registry, session, *site, request, send, recv).await
         }
-        SiteSource::Loopback(site) => serve_loopback_http(site, request, body, send).await,
+        SiteSource::Loopback(site) => serve_loopback_http(*site, request, body, send).await,
     }
 }
 
@@ -1848,6 +2108,45 @@ mod tests {
             registry.can_admit(expired_id, &capability, 100),
             Err(DenialCode::Expired)
         );
+    }
+
+    #[test]
+    fn tcp_mounts_require_an_explicitly_scoped_invitation() {
+        let registry = CapabilityRegistry::default();
+        let web_invite = Uuid::new_v4();
+        let tcp_invite = Uuid::new_v4();
+        let capability = [15_u8; 32];
+        registry.insert(web_invite, &capability, 200, 1).unwrap();
+        registry
+            .insert_for_tcp(tcp_invite, &capability, 200, 1, None)
+            .unwrap();
+
+        assert_eq!(
+            registry.can_admit_tcp(web_invite, &capability, 100),
+            Err(DenialCode::Invalid)
+        );
+        assert!(registry.can_admit_tcp(tcp_invite, &capability, 100).is_ok());
+        let session_id = Uuid::new_v4();
+        let session_key = SecretKey::generate();
+        let endpoint = SecretKey::generate().public();
+        registry
+            .admit_tcp(
+                tcp_invite,
+                &capability,
+                session_id,
+                *session_key.public().as_bytes(),
+                endpoint,
+                100,
+            )
+            .unwrap();
+        let host = SecretKey::generate();
+        let issued = grant(
+            &host,
+            tcp_invite,
+            session_id,
+            *session_key.public().as_bytes(),
+        );
+        assert!(registry.can_resume_tcp(&issued).is_ok());
     }
 
     #[test]

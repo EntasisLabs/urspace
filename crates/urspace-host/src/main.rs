@@ -20,15 +20,19 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, RelayUrl, SecretKey, endpoint::pre
 use iroh_tickets::endpoint::EndpointTicket;
 use rand::Rng as _;
 use tokio::io::AsyncBufReadExt as _;
-use urspace_host::native_client::{NativeSiteClient, receive_socket_message, send_socket_message};
+use urspace_host::native_client::{
+    NativeSiteClient, NativeTransport, receive_socket_message, send_socket_message,
+};
 use urspace_host::{
-    CapabilityRegistry, LoopbackSite, SessionGrantIssuer, SiteProtocol, StaticSite, unix_now,
+    CapabilityRegistry, LoopbackSite, SessionGrantIssuer, SiteProtocol, StaticSite, TunnelProtocol,
+    unix_now,
 };
 use urspace_protocol::{
     ALPN, ClientAuthV4, ClientHello, ClientProofV4, INVITE_VERSION, InviteGrant, RequestMethod,
     SESSION_PROOF_VERSION, ServerAuthV4, ServerHello, ServerHelloV4, SessionProofPayload,
-    SessionProofPurpose, SiteRequest, SiteResponseHead, alpn_for_invite, invite_url, read_frame,
-    sign_invite, sign_session_proof, verify_invite_url, verify_session_grant, write_frame,
+    SessionProofPurpose, SiteRequest, SiteResponseHead, TUNNEL_ALPN, alpn_for_invite, invite_url,
+    read_frame, sign_invite, sign_session_proof, verify_invite_url, verify_session_grant,
+    write_frame,
 };
 use uuid::Uuid;
 use zeroize::Zeroize as _;
@@ -113,11 +117,14 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
-    /// Open a saved private site through a native localhost gateway.
+    /// Connect to a private service through a native localhost endpoint.
     Connect {
         /// Local name for this private site enrollment.
         #[arg(value_parser = normalize_site_name)]
         name: String,
+        /// Mount the remote service on this local TCP endpoint, for example localhost:9090.
+        #[arg(value_name = "LOCAL_ENDPOINT", value_parser = normalize_local_mount, conflicts_with = "listen")]
+        local_endpoint: Option<SocketAddr>,
         /// One-time invitation used to enroll this device.
         #[arg(long, value_name = "URL", conflicts_with = "invite_stdin")]
         invite: Option<String>,
@@ -209,6 +216,9 @@ enum ServiceCommand {
         /// Print the direct invitation required by native device enrollment.
         #[arg(long)]
         direct: bool,
+        /// Permit this invitation to mount the app as a raw local TCP port.
+        #[arg(long)]
+        tcp: bool,
     },
     /// List browser and native devices admitted to a running service.
     Sessions {
@@ -373,6 +383,7 @@ async fn main() -> Result<()> {
                 access_label,
                 max_sessions,
                 direct,
+                tcp,
             } => {
                 let max_sessions = max_sessions.or(access_label.as_ref().map(|_| 1));
                 service_request(
@@ -380,7 +391,8 @@ async fn main() -> Result<()> {
                     ControlAction::Invite {
                         access_label,
                         max_sessions,
-                        direct,
+                        direct: direct || tcp,
+                        tcp,
                     },
                 )
                 .await
@@ -401,10 +413,11 @@ async fn main() -> Result<()> {
         },
         Command::Connect {
             name,
+            local_endpoint,
             invite,
             invite_stdin,
             listen,
-        } => connect_site(name, invite, invite_stdin, listen).await,
+        } => connect_site(name, local_endpoint, invite, invite_stdin, listen).await,
     }
 }
 
@@ -476,6 +489,7 @@ async fn install_managed_service(
             access_label: None,
             max_sessions: None,
             direct: false,
+            tcp: false,
         },
     )
     .await
@@ -523,6 +537,7 @@ async fn start_managed_service(name: &str) -> Result<()> {
             access_label: None,
             max_sessions: None,
             direct: false,
+            tcp: false,
         },
     )
     .await
@@ -539,6 +554,7 @@ async fn restart_managed_service(name: &str) -> Result<()> {
             access_label: None,
             max_sessions: None,
             direct: false,
+            tcp: false,
         },
     )
     .await
@@ -636,6 +652,7 @@ impl ServiceRuntime {
                 access_label,
                 max_sessions,
                 direct,
+                tcp,
             } => {
                 let access_label = access_label
                     .as_deref()
@@ -647,7 +664,7 @@ impl ServiceRuntime {
                     bail!("max-sessions must be greater than zero");
                 }
                 let url = self
-                    .rotate_invite(access_label.as_deref(), invitation_sessions, !direct)
+                    .rotate_invite(access_label.as_deref(), invitation_sessions, !direct, tcp)
                     .await?;
                 let message = access_label.as_deref().map_or_else(
                     || "created a fresh invitation; previously admitted browsers remain authorized".to_owned(),
@@ -726,14 +743,15 @@ impl ServiceRuntime {
         access_label: Option<&str>,
         max_sessions: u32,
         publish_short_link: bool,
+        allow_tcp: bool,
     ) -> Result<url::Url> {
         self.registry.close_admissions(self.current_invite_id)?;
-        self.replace_closed_invite_for(access_label, max_sessions, publish_short_link)
+        self.replace_closed_invite_for(access_label, max_sessions, publish_short_link, allow_tcp)
             .await
     }
 
     async fn replace_closed_invite(&mut self) -> Result<url::Url> {
-        self.replace_closed_invite_for(None, self.max_sessions, true)
+        self.replace_closed_invite_for(None, self.max_sessions, true, false)
             .await
     }
 
@@ -742,6 +760,7 @@ impl ServiceRuntime {
         access_label: Option<&str>,
         max_sessions: u32,
         publish_short_link: bool,
+        allow_tcp: bool,
     ) -> Result<url::Url> {
         replace_closed_invite(
             &self.endpoint,
@@ -757,6 +776,7 @@ impl ServiceRuntime {
                 None
             },
             access_label,
+            allow_tcp,
             &mut self.current_invite_id,
             &mut self.current_raw_url,
         )
@@ -811,6 +831,7 @@ async fn run_service(
         ttl_seconds,
         settings.max_sessions,
         None,
+        false,
         &settings.entry_path,
     )?;
     let short_links = settings
@@ -829,7 +850,14 @@ async fn run_service(
         settings.entry_path.clone(),
     );
     let router = Router::builder(endpoint.clone())
-        .accept(ALPN, SiteProtocol::loopback(registry.clone(), site, issuer))
+        .accept(
+            ALPN,
+            SiteProtocol::loopback(registry.clone(), site.clone(), issuer.clone()),
+        )
+        .accept(
+            TUNNEL_ALPN,
+            TunnelProtocol::new(registry.clone(), site, issuer),
+        )
         .spawn();
     let source_description = format!("app at {}", upstream.trim_end_matches('/'));
 
@@ -1046,6 +1074,7 @@ async fn serve_protocol<T>(
         ttl_seconds,
         max_sessions,
         None,
+        false,
         &entry_path,
     )?;
     let share_url = publish_share_url(&raw_url, expires_at_unix, short_links.as_ref()).await;
@@ -1111,6 +1140,7 @@ fn mint_invite(
     ttl_seconds: i64,
     max_sessions: u32,
     access_label: Option<&str>,
+    allow_tcp: bool,
     entry_path: &str,
 ) -> Result<(Uuid, url::Url, i64)> {
     let invite_id = Uuid::new_v4();
@@ -1130,13 +1160,23 @@ fn mint_invite(
         },
     )?;
     let url = invite_url(&encoded)?;
-    registry.insert_for(
-        invite_id,
-        &capability,
-        expires_at_unix,
-        max_sessions,
-        access_label.map(str::to_owned),
-    )?;
+    if allow_tcp {
+        registry.insert_for_tcp(
+            invite_id,
+            &capability,
+            expires_at_unix,
+            max_sessions,
+            access_label.map(str::to_owned),
+        )?;
+    } else {
+        registry.insert_for(
+            invite_id,
+            &capability,
+            expires_at_unix,
+            max_sessions,
+            access_label.map(str::to_owned),
+        )?;
+    }
     Ok((invite_id, url, expires_at_unix))
 }
 
@@ -1276,6 +1316,7 @@ async fn rotate_invite(
         entry_path,
         short_links,
         None,
+        false,
         current_invite_id,
         current_raw_url,
     )
@@ -1293,6 +1334,7 @@ async fn replace_closed_invite(
     entry_path: &str,
     short_links: Option<&ShortLinkPublisher>,
     access_label: Option<&str>,
+    allow_tcp: bool,
     current_invite_id: &mut Uuid,
     current_raw_url: &mut url::Url,
 ) -> Result<url::Url> {
@@ -1304,6 +1346,7 @@ async fn replace_closed_invite(
         ttl_seconds,
         max_sessions,
         access_label,
+        allow_tcp,
         entry_path,
     )?;
     let share_url = publish_share_url(&raw_url, expires_at_unix, short_links).await;
@@ -1370,6 +1413,7 @@ struct LocalGatewayState {
 
 async fn connect_site(
     name: String,
+    local_endpoint: Option<SocketAddr>,
     mut invitation: Option<String>,
     invite_stdin: bool,
     listen: Option<SocketAddr>,
@@ -1395,25 +1439,55 @@ async fn connect_site(
                 "device `{name}` is already enrolled; choose another name or reconnect without an invitation"
             ),
             Some(raw) => {
-                let address = listen.unwrap_or(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+                let transport = if local_endpoint.is_some() {
+                    NativeTransport::Tcp
+                } else {
+                    NativeTransport::Web
+                };
+                let address = local_endpoint
+                    .or(listen)
+                    .unwrap_or(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
                 let listener = tokio::net::TcpListener::bind(address)
                     .await
                     .with_context(|| format!("bind native gateway to {address}"))?;
                 let local_port = listener.local_addr()?.port();
                 let client =
-                    NativeSiteClient::enroll(raw, session_path.clone(), local_port, unix_now())
-                        .await?;
+                    NativeSiteClient::enroll(
+                        raw,
+                        session_path.clone(),
+                        local_port,
+                        transport,
+                        unix_now(),
+                    )
+                    .await?;
                 Ok((client, listener))
             }
             None if session_path.exists() => {
-                let client = NativeSiteClient::resume(session_path.clone(), unix_now()).await?;
-                let address = listen.unwrap_or(SocketAddr::from((
-                    Ipv4Addr::LOCALHOST,
-                    client.local_port(),
-                )));
-                let listener = tokio::net::TcpListener::bind(address)
-                    .await
-                    .with_context(|| format!("bind native gateway to {address}"))?;
+                let (client, listener) = if let Some(address) = local_endpoint {
+                    let listener = tokio::net::TcpListener::bind(address)
+                        .await
+                        .with_context(|| format!("bind local port mount to {address}"))?;
+                    let local_port = listener.local_addr()?.port();
+                    let client =
+                        NativeSiteClient::resume_tcp(session_path.clone(), local_port, unix_now())
+                            .await?;
+                    (client, listener)
+                } else {
+                    let client = NativeSiteClient::resume(session_path.clone(), unix_now()).await?;
+                    if listen.is_some() && client.transport() == NativeTransport::Tcp {
+                        bail!(
+                            "--listen configures the browser gateway; pass localhost:<port> to override a TCP mount"
+                        );
+                    }
+                    let address = listen.unwrap_or(SocketAddr::from((
+                        Ipv4Addr::LOCALHOST,
+                        client.local_port(),
+                    )));
+                    let listener = tokio::net::TcpListener::bind(address)
+                        .await
+                        .with_context(|| format!("bind local Urspace endpoint to {address}"))?;
+                    (client, listener)
+                };
                 Ok((client, listener))
             }
             None => bail!(
@@ -1426,6 +1500,9 @@ async fn connect_site(
         invitation.zeroize();
     }
     let (client, listener) = connection_result?;
+    if client.transport() == NativeTransport::Tcp {
+        return serve_local_tcp_mount(name, client, listener).await;
+    }
     let local_address = listener.local_addr()?;
     let authority = format!(
         "{}.localhost:{}",
@@ -1453,6 +1530,58 @@ async fn connect_site(
         })
         .await
         .context("run native Urspace gateway")
+}
+
+async fn serve_local_tcp_mount(
+    name: String,
+    client: NativeSiteClient,
+    listener: tokio::net::TcpListener,
+) -> Result<()> {
+    let local_address = listener.local_addr()?;
+    let site_handle = public_site_handle(client.site_id());
+    let client = Arc::new(client);
+    println!(
+        "Urspace mounted `{name}` ({site_handle}) at localhost:{}.",
+        local_address.port()
+    );
+    println!("TCP traffic is carried over the encrypted Iroh connection.");
+    println!("Cloudflare is not used. Press Ctrl+C to remove the local mount.");
+
+    loop {
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal?;
+                return Ok(());
+            }
+            accepted = listener.accept() => {
+                let (local, _) = accepted.context("accept local port connection")?;
+                let client = Arc::clone(&client);
+                tokio::spawn(async move {
+                    let _ = bridge_local_tcp(local, client).await;
+                });
+            }
+        }
+    }
+}
+
+async fn bridge_local_tcp(
+    local: tokio::net::TcpStream,
+    client: Arc<NativeSiteClient>,
+) -> Result<()> {
+    let mesh = client.open_tunnel().await?;
+    let (mut local_read, mut local_write) = local.into_split();
+    let mut mesh_send = mesh.send;
+    let mut mesh_recv = mesh.recv;
+    let upload = async {
+        tokio::io::copy(&mut local_read, &mut mesh_send).await?;
+        mesh_send.finish().map_err(std::io::Error::other)
+    };
+    let download = async {
+        tokio::io::copy(&mut mesh_recv, &mut local_write).await?;
+        tokio::io::AsyncWriteExt::shutdown(&mut local_write).await
+    };
+    tokio::try_join!(upload, download)?;
+    Ok(())
 }
 
 async fn local_gateway_request(
@@ -1803,6 +1932,21 @@ fn normalize_access_label(raw: &str) -> Result<String, String> {
     Ok(normalized.to_owned())
 }
 
+fn normalize_local_mount(raw: &str) -> Result<SocketAddr, String> {
+    let normalized = raw
+        .trim()
+        .strip_prefix("localhost:")
+        .map(|port| format!("127.0.0.1:{port}"))
+        .unwrap_or_else(|| raw.trim().to_owned());
+    let address = normalized
+        .parse::<SocketAddr>()
+        .map_err(|_| "local endpoint must look like localhost:9090".to_owned())?;
+    if address.ip() != Ipv4Addr::LOCALHOST || address.port() == 0 {
+        return Err("local endpoint must use localhost or 127.0.0.1 with a fixed port".into());
+    }
+    Ok(address)
+}
+
 fn normalize_connect_listen(raw: &str) -> Result<SocketAddr, String> {
     let address = raw
         .parse::<SocketAddr>()
@@ -2068,6 +2212,7 @@ mod tests {
                     access_label,
                     max_sessions,
                     direct,
+                    tcp,
                 },
         } = cli.command
         else {
@@ -2077,7 +2222,27 @@ mod tests {
         assert_eq!(access_label.as_deref(), Some("Alice / work laptop"));
         assert_eq!(max_sessions, None);
         assert!(!direct);
+        assert!(!tcp);
         assert!(normalize_access_label("bad\nlabel").is_err());
+
+        let cli = Cli::try_parse_from([
+            "urspace",
+            "service",
+            "invite",
+            "boxclub",
+            "--for",
+            "Alice / work laptop",
+            "--tcp",
+        ])
+        .unwrap();
+        let Command::Service {
+            command: ServiceCommand::Invite { direct, tcp, .. },
+        } = cli.command
+        else {
+            panic!("expected service invite command");
+        };
+        assert!(!direct);
+        assert!(tcp);
     }
 
     #[test]
@@ -2093,6 +2258,7 @@ mod tests {
         .unwrap();
         let Command::Connect {
             name,
+            local_endpoint,
             invite,
             invite_stdin,
             listen,
@@ -2101,6 +2267,7 @@ mod tests {
             panic!("expected connect command");
         };
         assert_eq!(name, "boxclub");
+        assert!(local_endpoint.is_none());
         assert!(invite.is_none());
         assert!(invite_stdin);
         assert_eq!(listen, Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 8080))));
@@ -2108,6 +2275,23 @@ mod tests {
             Cli::try_parse_from(["urspace", "connect", "boxclub", "--listen", "0.0.0.0:8080"])
                 .is_err()
         );
+
+        let cli = Cli::try_parse_from([
+            "urspace",
+            "connect",
+            "boxclub",
+            "localhost:9090",
+            "--invite-stdin",
+        ])
+        .unwrap();
+        let Command::Connect { local_endpoint, .. } = cli.command else {
+            panic!("expected connect command");
+        };
+        assert_eq!(
+            local_endpoint,
+            Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9090)))
+        );
+        assert!(Cli::try_parse_from(["urspace", "connect", "boxclub", "0.0.0.0:9090"]).is_err());
     }
 
     #[test]

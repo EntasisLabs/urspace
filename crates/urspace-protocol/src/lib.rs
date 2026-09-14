@@ -11,7 +11,9 @@ use url::Url;
 use uuid::Uuid;
 
 pub const ALPN: &[u8] = b"urspace-site/4";
+pub const TUNNEL_ALPN: &[u8] = b"urspace-tunnel/1";
 pub const INVITE_VERSION: u8 = 4;
+pub const TUNNEL_VERSION: u8 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const BOOTSTRAP_PATH: &str = "/.urspace/open/";
 
@@ -166,6 +168,17 @@ pub struct ClientProofV4 {
 pub enum ServerHelloV4 {
     Granted { session_grant: String },
     Denied { code: DenialCode },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelOpenV1 {
+    pub version: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TunnelStatusV1 {
+    Ready,
+    Denied,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,7 +456,9 @@ fn validate_session_proof_payload(
     proof: &SessionProofPayload,
     now_unix: Option<i64>,
 ) -> Result<(), SessionGrantError> {
-    if proof.version != SESSION_PROOF_VERSION || proof.alpn != ALPN {
+    if proof.version != SESSION_PROOF_VERSION
+        || !matches!(proof.alpn.as_slice(), ALPN | TUNNEL_ALPN)
+    {
         return Err(SessionGrantError::InvalidProof);
     }
     if proof.expires_at_unix < 0 || now_unix.is_some_and(|now| proof.expires_at_unix <= now) {
@@ -972,6 +987,37 @@ mod tests {
         };
         proof.site_id = SecretKey::generate().public().to_z32();
 
+        assert!(matches!(
+            sign_session_proof(&session, &proof),
+            Err(SessionGrantError::InvalidProof)
+        ));
+    }
+
+    #[test]
+    fn tunnel_proofs_are_versioned_and_bound_to_the_tunnel_alpn() {
+        let (host, session, grant) = grant_fixture();
+        let endpoint = SecretKey::generate();
+        let mut proof = SessionProofPayload {
+            version: SESSION_PROOF_VERSION,
+            purpose: SessionProofPurpose::Resume,
+            host_id: *host.public().as_bytes(),
+            site_id: host.public().to_z32(),
+            alpn: TUNNEL_ALPN.to_vec(),
+            session_id: Uuid::from_u128(2),
+            session_grant_hash: session_grant_hash(&grant),
+            endpoint_id: *endpoint.public().as_bytes(),
+            challenge_id: Uuid::from_u128(4),
+            nonce: [10_u8; 32],
+            expires_at_unix: 1_600,
+        };
+        let signature = sign_session_proof(&session, &proof).unwrap();
+        verify_session_proof(session.public().as_bytes(), &proof, &signature, 1_500).unwrap();
+
+        proof.alpn = ALPN.to_vec();
+        assert!(
+            verify_session_proof(session.public().as_bytes(), &proof, &signature, 1_500).is_err()
+        );
+        proof.alpn = b"urspace-tunnel/2".to_vec();
         assert!(matches!(
             sign_session_proof(&session, &proof),
             Err(SessionGrantError::InvalidProof)
