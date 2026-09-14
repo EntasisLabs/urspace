@@ -3705,7 +3705,7 @@ dependencies = [
 
 [[package]]
 name = "urspace-bootstrap"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3717,7 +3717,7 @@ dependencies = [
 
 [[package]]
 name = "urspace-browser"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "getrandom 0.3.4",
  "iroh",
@@ -3736,7 +3736,7 @@ dependencies = [
 
 [[package]]
 name = "urspace-host"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3768,7 +3768,7 @@ dependencies = [
 
 [[package]]
 name = "urspace-protocol"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
