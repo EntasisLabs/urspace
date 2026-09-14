@@ -78,6 +78,30 @@ has not been changed. Set `URSPACE_INSTALL_DIR` if you want another location.
 On Windows, download the Windows zip from
 [GitHub Releases](https://github.com/EntasisLabs/urspace/releases).
 
+## Give Urspace to your agent
+
+Urspace includes an [Agent Skill](skills/urspace/SKILL.md) that teaches compatible
+agents how to install the verified CLI, share a local app or static directory,
+run named services, create least-privilege invitations, connect managed devices,
+and revoke access without exposing secrets in shell history.
+
+Preview and install it with GitHub CLI 2.90 or newer:
+
+```bash
+gh skill preview EntasisLabs/urspace urspace
+gh skill install EntasisLabs/urspace urspace
+```
+
+Or install it with the cross-agent Skills CLI:
+
+```bash
+npx skills add EntasisLabs/urspace --skill urspace
+```
+
+Then ask your agent naturally: “Use Urspace to privately share the app running
+on localhost:9090 with one person for ten minutes.” The skill remains subject to
+the agent's normal approval and sandbox rules.
+
 To build from source instead:
 
 ```bash
