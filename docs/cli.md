@@ -131,12 +131,22 @@ urspace service status boxclub
 urspace service start boxclub
 urspace service restart boxclub
 urspace service invite boxclub
+urspace service invite boxclub --for "Alice / work laptop"
+urspace service invite boxclub --for "QA team" --max-sessions 4
 urspace service sessions boxclub
 urspace service kick boxclub <session-id>
 urspace service kick-all boxclub
 urspace service stop boxclub
 urspace service uninstall boxclub
 ```
+
+A named invitation is the first team-access building block. `--for` records a
+local administrative label with browsers admitted through that invitation and
+defaults that invitation to one session. Use `--max-sessions` when the label is
+for several devices. The label is stored in the host's private authorization
+journal and shown by `service sessions`; it is not sent to the browser or used as
+identity proof. Anyone holding the invitation can consume an available slot, so
+send each named invitation only to its intended recipient.
 
 The complete session UUID shown by `service sessions` is required for a kick.
 The local control token is regenerated for each run and stored in a private file

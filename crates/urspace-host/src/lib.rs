@@ -88,6 +88,8 @@ enum RegistryEvent {
         capability_hash: [u8; 32],
         expires_at_unix: i64,
         max_sessions: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access_label: Option<String>,
     },
     AdmissionsClosed {
         invite_id: Uuid,
@@ -129,6 +131,7 @@ struct InviteRecord {
     capability_hash: [u8; 32],
     expires_at_unix: i64,
     remaining_sessions: u32,
+    access_label: Option<String>,
     admitted_sessions: HashSet<Uuid>,
     admissions_closed: bool,
     revoked: bool,
@@ -156,11 +159,12 @@ struct RegistryState {
     active: HashMap<Uuid, ActiveConnection>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
     pub session_id: Uuid,
     pub endpoint_id: EndpointId,
     pub connected: bool,
+    pub access_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,11 +229,26 @@ impl CapabilityRegistry {
         expires_at_unix: i64,
         max_sessions: u32,
     ) -> Result<(), RegistryError> {
+        self.insert_for(invite_id, capability, expires_at_unix, max_sessions, None)
+    }
+
+    /// Inserts an invitation whose admitted sessions carry an operator-visible label.
+    ///
+    /// The label is local administrative metadata, not an authenticated user identity.
+    pub fn insert_for(
+        &self,
+        invite_id: Uuid,
+        capability: &[u8; 32],
+        expires_at_unix: i64,
+        max_sessions: u32,
+        access_label: Option<String>,
+    ) -> Result<(), RegistryError> {
         let event = RegistryEvent::InviteInserted {
             invite_id,
             capability_hash: capability_hash(capability),
             expires_at_unix,
             max_sessions,
+            access_label,
         };
         let mut guard = self.inner.lock().expect("capability registry poisoned");
         if max_sessions == 0 || guard.invites.contains_key(&invite_id) {
@@ -419,6 +438,10 @@ impl CapabilityRegistry {
                     session_id: *session_id,
                     endpoint_id: record.endpoint_id,
                     connected: guard.active.contains_key(session_id),
+                    access_label: guard
+                        .invites
+                        .get(&record.invite_id)
+                        .and_then(|invite| invite.access_label.clone()),
                 })
             })
             .collect();
@@ -702,6 +725,7 @@ fn apply_registry_event(
             capability_hash,
             expires_at_unix,
             max_sessions,
+            access_label,
         } => {
             if max_sessions == 0 || state.invites.contains_key(&invite_id) {
                 return Err(invalid_registry_event());
@@ -712,6 +736,7 @@ fn apply_registry_event(
                     capability_hash,
                     expires_at_unix,
                     remaining_sessions: max_sessions,
+                    access_label,
                     admitted_sessions: HashSet::new(),
                     admissions_closed: false,
                     revoked: false,
@@ -1817,6 +1842,7 @@ mod tests {
                 session_id,
                 endpoint_id: endpoint_b,
                 connected: false,
+                access_label: None,
             }]
         );
     }
@@ -1908,6 +1934,7 @@ mod tests {
                 session_id,
                 endpoint_id: endpoint,
                 connected: false,
+                access_label: None,
             }]
         );
         assert_eq!(
@@ -1939,6 +1966,54 @@ mod tests {
             registry.resume(&issued, endpoint),
             Err(RegistryError::Denied(DenialCode::Revoked))
         ));
+    }
+
+    #[test]
+    fn access_labels_follow_admitted_sessions_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = directory.path().join("authorization.jsonl");
+        let invite_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let capability = [45_u8; 32];
+        let session_key = SecretKey::generate();
+        let endpoint = SecretKey::generate().public();
+
+        let registry = CapabilityRegistry::open(&journal).unwrap();
+        registry
+            .insert_for(
+                invite_id,
+                &capability,
+                200,
+                1,
+                Some("Alice / work laptop".into()),
+            )
+            .unwrap();
+        registry
+            .admit(
+                invite_id,
+                &capability,
+                session_id,
+                *session_key.public().as_bytes(),
+                endpoint,
+                100,
+            )
+            .unwrap();
+        drop(registry);
+
+        let encoded = std::fs::read_to_string(&journal).unwrap();
+        assert!(encoded.contains("Alice / work laptop"));
+        assert!(!encoded.contains("\"capability\":"));
+
+        let registry = CapabilityRegistry::open(&journal).unwrap();
+        assert_eq!(
+            registry.sessions(),
+            vec![SessionInfo {
+                session_id,
+                endpoint_id: endpoint,
+                connected: false,
+                access_label: Some("Alice / work laptop".into()),
+            }]
+        );
     }
 
     #[test]
@@ -2146,6 +2221,7 @@ mod tests {
                 session_id: admitted.session_id,
                 endpoint_id: client.id(),
                 connected: true,
+                access_label: None,
             }]
         );
         assert!(registry.kick(admitted.session_id).unwrap());

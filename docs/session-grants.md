@@ -142,6 +142,7 @@ session_id -> {
   invite_id,
   session_public_key,
   authorization_epoch,
+  access_label?,
   active | kicked | revoked,
   current_endpoint_id,
 }
@@ -155,6 +156,10 @@ from a grant alone. Named service mode persists registry mutations as a private
 append-only journal. It writes and syncs the event before changing live
 authorization state, restores only complete events, and never records capability
 plaintext or a browser private key.
+
+An optional access label is inherited from the invitation and remains host-side
+administrative metadata. It helps an owner find a device in `service sessions`,
+but it is neither signed into the browser grant nor accepted as identity proof.
 
 ## Browser and Worker recovery
 

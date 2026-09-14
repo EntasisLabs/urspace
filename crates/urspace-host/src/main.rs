@@ -174,6 +174,12 @@ enum ServiceCommand {
     Invite {
         #[arg(value_parser = normalize_site_name)]
         name: String,
+        /// Local label shown beside browsers admitted with this invitation.
+        #[arg(long = "for", value_name = "PERSON_OR_DEVICE", value_parser = normalize_access_label)]
+        access_label: Option<String>,
+        /// Admission limit for this invitation (defaults to 1 with --for).
+        #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..))]
+        max_sessions: Option<u32>,
     },
     /// List browsers admitted to a running service.
     Sessions {
@@ -333,7 +339,21 @@ async fn main() -> Result<()> {
             ServiceCommand::Status { name } => service_status(&name).await,
             ServiceCommand::Start { name } => start_managed_service(&name).await,
             ServiceCommand::Restart { name } => restart_managed_service(&name).await,
-            ServiceCommand::Invite { name } => service_request(&name, ControlAction::Invite).await,
+            ServiceCommand::Invite {
+                name,
+                access_label,
+                max_sessions,
+            } => {
+                let max_sessions = max_sessions.or(access_label.as_ref().map(|_| 1));
+                service_request(
+                    &name,
+                    ControlAction::Invite {
+                        access_label,
+                        max_sessions,
+                    },
+                )
+                .await
+            }
             ServiceCommand::Sessions { name } => {
                 service_request(&name, ControlAction::Sessions).await
             }
@@ -412,7 +432,14 @@ async fn install_managed_service(
     if let Some(note) = outcome.persistence_note {
         println!("{note}");
     }
-    service_request(&name, ControlAction::Invite).await
+    service_request(
+        &name,
+        ControlAction::Invite {
+            access_label: None,
+            max_sessions: None,
+        },
+    )
+    .await
 }
 
 async fn run_managed_service(name: &str) -> Result<()> {
@@ -451,7 +478,14 @@ async fn start_managed_service(name: &str) -> Result<()> {
     native_service::start(name)?;
     await_service_ready(name).await?;
     println!("Started Urspace service `{name}`.");
-    service_request(name, ControlAction::Invite).await
+    service_request(
+        name,
+        ControlAction::Invite {
+            access_label: None,
+            max_sessions: None,
+        },
+    )
+    .await
 }
 
 async fn restart_managed_service(name: &str) -> Result<()> {
@@ -459,7 +493,14 @@ async fn restart_managed_service(name: &str) -> Result<()> {
     native_service::restart(name)?;
     await_service_ready(name).await?;
     println!("Restarted Urspace service `{name}`.");
-    service_request(name, ControlAction::Invite).await
+    service_request(
+        name,
+        ControlAction::Invite {
+            access_label: None,
+            max_sessions: None,
+        },
+    )
+    .await
 }
 
 async fn stop_service(name: &str) -> Result<()> {
@@ -550,11 +591,29 @@ impl ServiceRuntime {
                 response.sessions = self.session_views();
                 Ok((response, false))
             }
-            ControlAction::Invite => {
-                let url = self.rotate_invite().await?;
-                let mut response = ControlResponse::success(
-                    "created a fresh invitation; previously admitted browsers remain authorized",
+            ControlAction::Invite {
+                access_label,
+                max_sessions,
+            } => {
+                let access_label = access_label
+                    .as_deref()
+                    .map(normalize_access_label)
+                    .transpose()
+                    .map_err(anyhow::Error::msg)?;
+                let invitation_sessions = max_sessions.unwrap_or(self.max_sessions);
+                if invitation_sessions == 0 {
+                    bail!("max-sessions must be greater than zero");
+                }
+                let url = self
+                    .rotate_invite(access_label.as_deref(), invitation_sessions)
+                    .await?;
+                let message = access_label.as_deref().map_or_else(
+                    || "created a fresh invitation; previously admitted browsers remain authorized".to_owned(),
+                    |label| format!(
+                        "created a {invitation_sessions}-session enrollment for `{label}`; the label is local administrative metadata, not verified identity"
+                    ),
                 );
+                let mut response = ControlResponse::success(message);
                 response.share_url = Some(url.to_string());
                 Ok((response, false))
             }
@@ -606,25 +665,41 @@ impl ServiceRuntime {
                 session_id: session.session_id.to_string(),
                 endpoint_id: session.endpoint_id.to_z32(),
                 connected: session.connected,
+                access_label: session.access_label,
             })
             .collect()
     }
 
-    async fn rotate_invite(&mut self) -> Result<url::Url> {
+    async fn rotate_invite(
+        &mut self,
+        access_label: Option<&str>,
+        max_sessions: u32,
+    ) -> Result<url::Url> {
         self.registry.close_admissions(self.current_invite_id)?;
-        self.replace_closed_invite().await
+        self.replace_closed_invite_for(access_label, max_sessions)
+            .await
     }
 
     async fn replace_closed_invite(&mut self) -> Result<url::Url> {
+        self.replace_closed_invite_for(None, self.max_sessions)
+            .await
+    }
+
+    async fn replace_closed_invite_for(
+        &mut self,
+        access_label: Option<&str>,
+        max_sessions: u32,
+    ) -> Result<url::Url> {
         replace_closed_invite(
             &self.endpoint,
             &self.identity,
             &self.registry,
             &self.bootstrap_origin,
             self.ttl_seconds,
-            self.max_sessions,
+            max_sessions,
             &self.entry_path,
             self.short_links.as_ref(),
+            access_label,
             &mut self.current_invite_id,
             &mut self.current_raw_url,
         )
@@ -678,6 +753,7 @@ async fn run_service(
         &settings.bootstrap_origin,
         ttl_seconds,
         settings.max_sessions,
+        None,
         &settings.entry_path,
     )?;
     let short_links = settings
@@ -832,7 +908,14 @@ fn print_service_response(response: ControlResponse) -> Result<()> {
             } else {
                 "disconnected (may reconnect)"
             };
-            println!("{}  {}  {state}", session.session_id, session.endpoint_id);
+            if let Some(label) = session.access_label {
+                println!(
+                    "{label}  {}  {}  {state}",
+                    session.session_id, session.endpoint_id
+                );
+            } else {
+                println!("{}  {}  {state}", session.session_id, session.endpoint_id);
+            }
         }
     }
     if let Some(url) = response.share_url {
@@ -900,6 +983,7 @@ async fn serve_protocol<T>(
         &bootstrap_origin,
         ttl_seconds,
         max_sessions,
+        None,
         &entry_path,
     )?;
     let share_url = publish_share_url(&raw_url, expires_at_unix, short_links.as_ref()).await;
@@ -964,6 +1048,7 @@ fn mint_invite(
     bootstrap_origin: &str,
     ttl_seconds: i64,
     max_sessions: u32,
+    access_label: Option<&str>,
     entry_path: &str,
 ) -> Result<(Uuid, url::Url, i64)> {
     let invite_id = Uuid::new_v4();
@@ -983,7 +1068,13 @@ fn mint_invite(
         },
     )?;
     let url = invite_url(&encoded)?;
-    registry.insert(invite_id, &capability, expires_at_unix, max_sessions)?;
+    registry.insert_for(
+        invite_id,
+        &capability,
+        expires_at_unix,
+        max_sessions,
+        access_label.map(str::to_owned),
+    )?;
     Ok((invite_id, url, expires_at_unix))
 }
 
@@ -1122,6 +1213,7 @@ async fn rotate_invite(
         max_sessions,
         entry_path,
         short_links,
+        None,
         current_invite_id,
         current_raw_url,
     )
@@ -1138,6 +1230,7 @@ async fn replace_closed_invite(
     max_sessions: u32,
     entry_path: &str,
     short_links: Option<&ShortLinkPublisher>,
+    access_label: Option<&str>,
     current_invite_id: &mut Uuid,
     current_raw_url: &mut url::Url,
 ) -> Result<url::Url> {
@@ -1148,6 +1241,7 @@ async fn replace_closed_invite(
         bootstrap_origin,
         ttl_seconds,
         max_sessions,
+        access_label,
         entry_path,
     )?;
     let share_url = publish_share_url(&raw_url, expires_at_unix, short_links).await;
@@ -1168,7 +1262,11 @@ fn print_sessions(registry: &CapabilityRegistry) {
         } else {
             "disconnected (may reconnect)"
         };
-        println!("{}  {state}", session.endpoint_id.to_z32());
+        if let Some(label) = session.access_label {
+            println!("{label}  {}  {state}", session.endpoint_id.to_z32());
+        } else {
+            println!("{}  {state}", session.endpoint_id.to_z32());
+        }
     }
 }
 
@@ -1343,6 +1441,14 @@ fn normalize_site_name(raw: &str) -> Result<String, String> {
         return Err("name must contain 1-64 letters, numbers, dashes, or underscores".into());
     }
     Ok(normalized)
+}
+
+fn normalize_access_label(raw: &str) -> Result<String, String> {
+    let normalized = raw.trim();
+    if normalized.is_empty() || normalized.len() > 120 || normalized.chars().any(char::is_control) {
+        return Err("access label must contain 1-120 printable characters".into());
+    }
+    Ok(normalized.to_owned())
 }
 
 fn parse_duration(raw: &str) -> Result<Duration, String> {
@@ -1580,6 +1686,34 @@ mod tests {
         assert_eq!(normalize_site_name(" BoxClub ").unwrap(), "boxclub");
         assert!(normalize_site_name("../boxclub").is_err());
         assert!(normalize_site_name("").is_err());
+    }
+
+    #[test]
+    fn named_access_invites_default_to_one_session() {
+        let cli = Cli::try_parse_from([
+            "urspace",
+            "service",
+            "invite",
+            "BoxClub",
+            "--for",
+            " Alice / work laptop ",
+        ])
+        .unwrap();
+        let Command::Service {
+            command:
+                ServiceCommand::Invite {
+                    name,
+                    access_label,
+                    max_sessions,
+                },
+        } = cli.command
+        else {
+            panic!("expected service invite command");
+        };
+        assert_eq!(name, "boxclub");
+        assert_eq!(access_label.as_deref(), Some("Alice / work laptop"));
+        assert_eq!(max_sessions, None);
+        assert!(normalize_access_label("bad\nlabel").is_err());
     }
 
     #[tokio::test]

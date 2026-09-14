@@ -122,10 +122,12 @@ wire contract.
 
 Named service mode persists an append-only authorization journal containing
 capability hashes, invitation limits, public session keys, endpoint identities,
-and revocation state. It never writes capability plaintext, a signed grant, or a
-browser private key. Mutations are appended and synced before the live registry
-changes. Recovery truncates an incomplete final append and rejects inconsistent
-complete events.
+revocation state, and optional operator-supplied access labels. Labels are local
+administrative metadata, not authenticated identities, and must never grant
+authority by themselves. The journal never writes capability plaintext, a
+signed grant, or a browser private key. Mutations are appended and synced before
+the live registry changes. Recovery truncates an incomplete final append and
+rejects inconsistent complete events.
 
 The service pins the relay address included in its signed session grants so the
 exact endpoint ticket remains stable across host process restarts. Startup closes

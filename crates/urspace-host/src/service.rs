@@ -21,9 +21,16 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 #[serde(deny_unknown_fields)]
 pub enum ControlAction {
     Status,
-    Invite,
+    Invite {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access_label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_sessions: Option<u32>,
+    },
     Sessions,
-    Kick { session_id: String },
+    Kick {
+        session_id: String,
+    },
     KickAll,
     Stop,
 }
@@ -33,6 +40,8 @@ pub struct SessionView {
     pub session_id: String,
     pub endpoint_id: String,
     pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -418,6 +427,31 @@ mod tests {
             URL_SAFE_NO_PAD.encode([9_u8; 32])
         );
         assert!(serde_json::from_str::<ControlRequest>(&request).is_err());
+    }
+
+    #[test]
+    fn invite_control_messages_are_backward_compatible_and_bounded() {
+        let token = URL_SAFE_NO_PAD.encode([9_u8; 32]);
+        let old = format!("{{\"token\":\"{token}\",\"command\":{{\"action\":\"invite\"}}}}");
+        let request: ControlRequest = serde_json::from_str(&old).unwrap();
+        assert!(matches!(
+            request.command,
+            ControlAction::Invite {
+                access_label: None,
+                max_sessions: None,
+            }
+        ));
+
+        let labeled = ControlRequest {
+            token,
+            command: ControlAction::Invite {
+                access_label: Some("Alice / work laptop".into()),
+                max_sessions: Some(1),
+            },
+        };
+        let encoded = serde_json::to_string(&labeled).unwrap();
+        assert!(encoded.contains("Alice / work laptop"));
+        assert!(encoded.contains("\"max_sessions\":1"));
     }
 
     #[test]
