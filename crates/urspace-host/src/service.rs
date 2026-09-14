@@ -26,18 +26,29 @@ pub enum ControlAction {
         access_label: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_sessions: Option<u32>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        direct: bool,
     },
     Sessions,
     Kick {
-        session_id: String,
+        #[serde(rename = "session_id")]
+        session_handle: String,
     },
     KickAll,
     Stop,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionView {
+    #[serde(default, rename = "session_handle")]
+    pub operator_handle: String,
+    /// Compatibility placeholder for clients predating opaque session handles.
     pub session_id: String,
+    /// Compatibility placeholder; endpoint identities are no longer exposed.
     pub endpoint_id: String,
     pub connected: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -439,6 +450,7 @@ mod tests {
             ControlAction::Invite {
                 access_label: None,
                 max_sessions: None,
+                direct: false,
             }
         ));
 
@@ -447,11 +459,41 @@ mod tests {
             command: ControlAction::Invite {
                 access_label: Some("Alice / work laptop".into()),
                 max_sessions: Some(1),
+                direct: true,
             },
         };
         let encoded = serde_json::to_string(&labeled).unwrap();
         assert!(encoded.contains("Alice / work laptop"));
         assert!(encoded.contains("\"max_sessions\":1"));
+        assert!(encoded.contains("\"direct\":true"));
+    }
+
+    #[test]
+    fn session_responses_never_expose_raw_internal_identifiers() {
+        let raw_session = "550e8400-e29b-41d4-a716-446655440000";
+        let raw_endpoint = "endpoint-public-key";
+        let mut response = ControlResponse::success("sessions");
+        response.sessions.push(SessionView {
+            operator_handle: "session-0123456789ab".into(),
+            session_id: "redacted".into(),
+            endpoint_id: "redacted".into(),
+            connected: true,
+            access_label: Some("Alice".into()),
+        });
+        let encoded = serde_json::to_string(&response).unwrap();
+        assert!(!encoded.contains(raw_session));
+        assert!(!encoded.contains(raw_endpoint));
+        assert!(encoded.contains("session-0123456789ab"));
+
+        let request = ControlRequest {
+            token: URL_SAFE_NO_PAD.encode([3_u8; 32]),
+            command: ControlAction::Kick {
+                session_handle: "session-0123456789ab".into(),
+            },
+        };
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(encoded.contains("\"session_id\":\"session-0123456789ab\""));
+        assert!(!encoded.contains("session_handle"));
     }
 
     #[test]

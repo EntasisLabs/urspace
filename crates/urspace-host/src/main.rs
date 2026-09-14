@@ -1,16 +1,26 @@
 use std::io::Write as _;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use axum::Router as AxumRouter;
+use axum::body::{Body, to_bytes};
+use axum::extract::ws::{CloseFrame, Message as AxumSocketMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::{FromRequestParts as _, State};
+use axum::http::{HeaderMap, Request, Response, StatusCode, header};
+use axum::response::IntoResponse as _;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Parser, Subcommand};
+use futures_util::{SinkExt as _, StreamExt as _};
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, RelayUrl, SecretKey, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
 use rand::Rng as _;
 use tokio::io::AsyncBufReadExt as _;
+use urspace_host::native_client::{NativeSiteClient, receive_socket_message, send_socket_message};
 use urspace_host::{
     CapabilityRegistry, LoopbackSite, SessionGrantIssuer, SiteProtocol, StaticSite, unix_now,
 };
@@ -21,6 +31,7 @@ use urspace_protocol::{
     sign_invite, sign_session_proof, verify_invite_url, verify_session_grant, write_frame,
 };
 use uuid::Uuid;
+use zeroize::Zeroize as _;
 
 mod native_service;
 mod service;
@@ -102,6 +113,21 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Open a saved private site through a native localhost gateway.
+    Connect {
+        /// Local name for this private site enrollment.
+        #[arg(value_parser = normalize_site_name)]
+        name: String,
+        /// One-time invitation used to enroll this device.
+        #[arg(long, value_name = "URL", conflicts_with = "invite_stdin")]
+        invite: Option<String>,
+        /// Read a one-time enrollment invitation from standard input.
+        #[arg(long, conflicts_with = "invite")]
+        invite_stdin: bool,
+        /// Loopback address for the local browser gateway.
+        #[arg(long, value_parser = normalize_connect_listen)]
+        listen: Option<SocketAddr>,
+    },
     /// Fetch a path with the native protocol client.
     #[command(hide = true)]
     Get {
@@ -174,25 +200,28 @@ enum ServiceCommand {
     Invite {
         #[arg(value_parser = normalize_site_name)]
         name: String,
-        /// Local label shown beside browsers admitted with this invitation.
+        /// Local label shown beside devices admitted with this invitation.
         #[arg(long = "for", value_name = "PERSON_OR_DEVICE", value_parser = normalize_access_label)]
         access_label: Option<String>,
         /// Admission limit for this invitation (defaults to 1 with --for).
         #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..))]
         max_sessions: Option<u32>,
+        /// Print the direct invitation required by native device enrollment.
+        #[arg(long)]
+        direct: bool,
     },
-    /// List browsers admitted to a running service.
+    /// List browser and native devices admitted to a running service.
     Sessions {
         #[arg(value_parser = normalize_site_name)]
         name: String,
     },
-    /// Disconnect and revoke one admitted browser session.
+    /// Disconnect and revoke one admitted browser or native-device session.
     Kick {
         #[arg(value_parser = normalize_site_name)]
         name: String,
-        session_id: String,
+        session_handle: String,
     },
-    /// Disconnect and revoke every admitted browser session.
+    /// Disconnect and revoke every admitted browser or native-device session.
     KickAll {
         #[arg(value_parser = normalize_site_name)]
         name: String,
@@ -343,6 +372,7 @@ async fn main() -> Result<()> {
                 name,
                 access_label,
                 max_sessions,
+                direct,
             } => {
                 let max_sessions = max_sessions.or(access_label.as_ref().map(|_| 1));
                 service_request(
@@ -350,6 +380,7 @@ async fn main() -> Result<()> {
                     ControlAction::Invite {
                         access_label,
                         max_sessions,
+                        direct,
                     },
                 )
                 .await
@@ -357,9 +388,10 @@ async fn main() -> Result<()> {
             ServiceCommand::Sessions { name } => {
                 service_request(&name, ControlAction::Sessions).await
             }
-            ServiceCommand::Kick { name, session_id } => {
-                service_request(&name, ControlAction::Kick { session_id }).await
-            }
+            ServiceCommand::Kick {
+                name,
+                session_handle,
+            } => service_request(&name, ControlAction::Kick { session_handle }).await,
             ServiceCommand::KickAll { name } => {
                 service_request(&name, ControlAction::KickAll).await
             }
@@ -367,6 +399,12 @@ async fn main() -> Result<()> {
             ServiceCommand::Uninstall { name } => uninstall_managed_service(&name).await,
             ServiceCommand::ManagedRun { name } => run_managed_service(&name).await,
         },
+        Command::Connect {
+            name,
+            invite,
+            invite_stdin,
+            listen,
+        } => connect_site(name, invite, invite_stdin, listen).await,
     }
 }
 
@@ -437,6 +475,7 @@ async fn install_managed_service(
         ControlAction::Invite {
             access_label: None,
             max_sessions: None,
+            direct: false,
         },
     )
     .await
@@ -483,6 +522,7 @@ async fn start_managed_service(name: &str) -> Result<()> {
         ControlAction::Invite {
             access_label: None,
             max_sessions: None,
+            direct: false,
         },
     )
     .await
@@ -498,6 +538,7 @@ async fn restart_managed_service(name: &str) -> Result<()> {
         ControlAction::Invite {
             access_label: None,
             max_sessions: None,
+            direct: false,
         },
     )
     .await
@@ -594,6 +635,7 @@ impl ServiceRuntime {
             ControlAction::Invite {
                 access_label,
                 max_sessions,
+                direct,
             } => {
                 let access_label = access_label
                     .as_deref()
@@ -605,7 +647,7 @@ impl ServiceRuntime {
                     bail!("max-sessions must be greater than zero");
                 }
                 let url = self
-                    .rotate_invite(access_label.as_deref(), invitation_sessions)
+                    .rotate_invite(access_label.as_deref(), invitation_sessions, !direct)
                     .await?;
                 let message = access_label.as_deref().map_or_else(
                     || "created a fresh invitation; previously admitted browsers remain authorized".to_owned(),
@@ -618,22 +660,31 @@ impl ServiceRuntime {
                 Ok((response, false))
             }
             ControlAction::Sessions => {
-                let mut response = ControlResponse::success("admitted browser sessions");
+                let mut response = ControlResponse::success("admitted device sessions");
                 response.sessions = self.session_views();
                 Ok((response, false))
             }
-            ControlAction::Kick { session_id } => {
-                let session_id = Uuid::parse_str(&session_id)
-                    .context("session id must be the complete UUID shown by `service sessions`")?;
+            ControlAction::Kick {
+                session_handle: handle,
+            } => {
+                let matches: Vec<_> = self
+                    .registry
+                    .sessions()
+                    .into_iter()
+                    .filter(|session| session.operator_handle == handle)
+                    .collect();
+                let [session] = matches.as_slice() else {
+                    bail!("no active admitted session has that handle");
+                };
                 if !self
                     .registry
-                    .kick_and_close_admissions(session_id, self.current_invite_id)?
+                    .kick_and_close_admissions(session.session_id, self.current_invite_id)?
                 {
-                    bail!("no active admitted session has that id");
+                    bail!("no active admitted session has that handle");
                 }
                 let url = self.replace_closed_invite().await?;
                 let mut response = ControlResponse::success(
-                    "browser session revoked and outstanding invitation rotated",
+                    "device session revoked and outstanding invitation rotated",
                 );
                 response.share_url = Some(url.to_string());
                 Ok((response, false))
@@ -642,9 +693,8 @@ impl ServiceRuntime {
                 let count = self
                     .registry
                     .kick_all_and_close_admissions(self.current_invite_id)?;
-                let mut response = ControlResponse::success(format!(
-                    "revoked {count} admitted browser session(s)"
-                ));
+                let mut response =
+                    ControlResponse::success(format!("revoked {count} admitted device session(s)"));
                 if count > 0 {
                     response.share_url = Some(self.replace_closed_invite().await?.to_string());
                 }
@@ -662,8 +712,9 @@ impl ServiceRuntime {
             .sessions()
             .into_iter()
             .map(|session| SessionView {
-                session_id: session.session_id.to_string(),
-                endpoint_id: session.endpoint_id.to_z32(),
+                operator_handle: session.operator_handle,
+                session_id: "redacted".into(),
+                endpoint_id: "redacted".into(),
                 connected: session.connected,
                 access_label: session.access_label,
             })
@@ -674,14 +725,15 @@ impl ServiceRuntime {
         &mut self,
         access_label: Option<&str>,
         max_sessions: u32,
+        publish_short_link: bool,
     ) -> Result<url::Url> {
         self.registry.close_admissions(self.current_invite_id)?;
-        self.replace_closed_invite_for(access_label, max_sessions)
+        self.replace_closed_invite_for(access_label, max_sessions, publish_short_link)
             .await
     }
 
     async fn replace_closed_invite(&mut self) -> Result<url::Url> {
-        self.replace_closed_invite_for(None, self.max_sessions)
+        self.replace_closed_invite_for(None, self.max_sessions, true)
             .await
     }
 
@@ -689,6 +741,7 @@ impl ServiceRuntime {
         &mut self,
         access_label: Option<&str>,
         max_sessions: u32,
+        publish_short_link: bool,
     ) -> Result<url::Url> {
         replace_closed_invite(
             &self.endpoint,
@@ -698,7 +751,11 @@ impl ServiceRuntime {
             self.ttl_seconds,
             max_sessions,
             &self.entry_path,
-            self.short_links.as_ref(),
+            if publish_short_link {
+                self.short_links.as_ref()
+            } else {
+                None
+            },
             access_label,
             &mut self.current_invite_id,
             &mut self.current_raw_url,
@@ -898,8 +955,11 @@ fn print_service_response(response: ControlResponse) -> Result<()> {
         println!("Site identity: {site_id}");
     }
     if response.sessions.is_empty() {
-        if response.message == "admitted browser sessions" {
-            println!("No browser sessions have been admitted.");
+        if matches!(
+            response.message.as_str(),
+            "admitted device sessions" | "admitted browser sessions"
+        ) {
+            println!("No device sessions have been admitted.");
         }
     } else {
         for session in response.sessions {
@@ -908,13 +968,15 @@ fn print_service_response(response: ControlResponse) -> Result<()> {
             } else {
                 "disconnected (may reconnect)"
             };
-            if let Some(label) = session.access_label {
-                println!(
-                    "{label}  {}  {}  {state}",
-                    session.session_id, session.endpoint_id
-                );
+            let handle = if session.operator_handle.is_empty() {
+                "unavailable-restart-service"
             } else {
-                println!("{}  {}  {state}", session.session_id, session.endpoint_id);
+                &session.operator_handle
+            };
+            if let Some(label) = session.access_label {
+                println!("{label}  {handle}  {state}");
+            } else {
+                println!("{handle}  {state}");
             }
         }
     }
@@ -1253,7 +1315,7 @@ async fn replace_closed_invite(
 fn print_sessions(registry: &CapabilityRegistry) {
     let sessions = registry.sessions();
     if sessions.is_empty() {
-        println!("No browser sessions have been admitted.");
+        println!("No device sessions have been admitted.");
         return;
     }
     for session in sessions {
@@ -1263,22 +1325,22 @@ fn print_sessions(registry: &CapabilityRegistry) {
             "disconnected (may reconnect)"
         };
         if let Some(label) = session.access_label {
-            println!("{label}  {}  {state}", session.endpoint_id.to_z32());
+            println!("{label}  {}  {state}", session.operator_handle);
         } else {
-            println!("{}  {state}", session.endpoint_id.to_z32());
+            println!("{}  {state}", session.operator_handle);
         }
     }
 }
 
 fn kick_session(registry: &CapabilityRegistry, prefix: &str) -> Result<bool> {
     if prefix.is_empty() {
-        println!("Usage: kick <session-id-prefix>");
+        println!("Usage: kick <session-handle-prefix>");
         return Ok(false);
     }
     let matches: Vec<_> = registry
         .sessions()
         .into_iter()
-        .filter(|session| session.endpoint_id.to_z32().starts_with(prefix))
+        .filter(|session| session.operator_handle.starts_with(prefix))
         .collect();
     match matches.as_slice() {
         [] => {
@@ -1287,7 +1349,7 @@ fn kick_session(registry: &CapabilityRegistry, prefix: &str) -> Result<bool> {
         }
         [session] => {
             if registry.kick(session.session_id)? {
-                println!("Kicked the selected browser session.");
+                println!("Kicked the selected device session.");
                 Ok(true)
             } else {
                 Ok(false)
@@ -1298,6 +1360,296 @@ fn kick_session(registry: &CapabilityRegistry, prefix: &str) -> Result<bool> {
             Ok(false)
         }
     }
+}
+
+#[derive(Clone)]
+struct LocalGatewayState {
+    client: Arc<NativeSiteClient>,
+    expected_authority: Arc<str>,
+}
+
+async fn connect_site(
+    name: String,
+    mut invitation: Option<String>,
+    invite_stdin: bool,
+    listen: Option<SocketAddr>,
+) -> Result<()> {
+    let session_path = service::data_directory()?
+        .join("clients")
+        .join(&name)
+        .join("device.json");
+    if invite_stdin {
+        let mut line = String::new();
+        eprintln!("Paste the one-time Urspace enrollment invitation, then press Enter:");
+        std::io::stdin()
+            .read_line(&mut line)
+            .context("read enrollment invitation")?;
+        invitation = Some(line.trim().to_owned());
+        line.zeroize();
+    }
+
+    let connection_result: Result<(NativeSiteClient, tokio::net::TcpListener)> = async {
+        match invitation.as_deref() {
+            Some("") => bail!("the enrollment invitation is empty"),
+            Some(_) if session_path.exists() => bail!(
+                "device `{name}` is already enrolled; choose another name or reconnect without an invitation"
+            ),
+            Some(raw) => {
+                let address = listen.unwrap_or(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+                let listener = tokio::net::TcpListener::bind(address)
+                    .await
+                    .with_context(|| format!("bind native gateway to {address}"))?;
+                let local_port = listener.local_addr()?.port();
+                let client =
+                    NativeSiteClient::enroll(raw, session_path.clone(), local_port, unix_now())
+                        .await?;
+                Ok((client, listener))
+            }
+            None if session_path.exists() => {
+                let client = NativeSiteClient::resume(session_path.clone(), unix_now()).await?;
+                let address = listen.unwrap_or(SocketAddr::from((
+                    Ipv4Addr::LOCALHOST,
+                    client.local_port(),
+                )));
+                let listener = tokio::net::TcpListener::bind(address)
+                    .await
+                    .with_context(|| format!("bind native gateway to {address}"))?;
+                Ok((client, listener))
+            }
+            None => bail!(
+                "device `{name}` is not enrolled; run `urspace connect {name} --invite-stdin` first"
+            ),
+        }
+    }
+    .await;
+    if let Some(invitation) = invitation.as_mut() {
+        invitation.zeroize();
+    }
+    let (client, listener) = connection_result?;
+    let local_address = listener.local_addr()?;
+    let authority = format!(
+        "{}.localhost:{}",
+        client.local_origin_label(),
+        local_address.port()
+    );
+    let entry_path = client.entry_path().to_owned();
+    let site_handle = public_site_handle(client.site_id());
+    let state = LocalGatewayState {
+        client: Arc::new(client),
+        expected_authority: authority.clone().into(),
+    };
+    let app = AxumRouter::new()
+        .fallback(local_gateway_request)
+        .with_state(state);
+
+    println!("Urspace connected device `{name}` to site {site_handle}.");
+    println!("Private local URL: http://{authority}{entry_path}");
+    println!("The device proof key is stored privately and Cloudflare is not used.");
+    println!("Press Ctrl+C to close the local gateway.");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
+        .context("run native Urspace gateway")
+}
+
+async fn local_gateway_request(
+    State(state): State<LocalGatewayState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let (mut parts, body) = request.into_parts();
+    if !local_authority_matches(&parts.headers, &state.expected_authority) {
+        return local_error(
+            StatusCode::MISDIRECTED_REQUEST,
+            "Unknown local Urspace site",
+        );
+    }
+    let path = parts
+        .uri
+        .path_and_query()
+        .map_or_else(|| "/".to_owned(), ToString::to_string);
+
+    if parts
+        .headers
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+    {
+        return match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
+            Ok(upgrade) => upgrade
+                .on_upgrade(move |socket| bridge_local_socket(socket, state.client, path))
+                .into_response(),
+            Err(_) => local_error(StatusCode::BAD_REQUEST, "Invalid WebSocket upgrade"),
+        };
+    }
+
+    let method = match request_method(&parts.method) {
+        Some(method) => method,
+        None => return local_error(StatusCode::METHOD_NOT_ALLOWED, "Unsupported request method"),
+    };
+    let headers = forward_request_headers(&parts.headers);
+    let body = match to_bytes(body, 16 * 1024 * 1024).await {
+        Ok(body) => body.to_vec(),
+        Err(_) => return local_error(StatusCode::PAYLOAD_TOO_LARGE, "Request body is too large"),
+    };
+    match state.client.fetch(method, path, headers, body).await {
+        Ok(response) => native_http_response(response),
+        Err(_) => local_error(StatusCode::BAD_GATEWAY, "Private site request failed"),
+    }
+}
+
+fn local_authority_matches(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|host| host.eq_ignore_ascii_case(expected))
+}
+
+fn request_method(method: &axum::http::Method) -> Option<RequestMethod> {
+    match *method {
+        axum::http::Method::GET => Some(RequestMethod::Get),
+        axum::http::Method::HEAD => Some(RequestMethod::Head),
+        axum::http::Method::POST => Some(RequestMethod::Post),
+        axum::http::Method::PUT => Some(RequestMethod::Put),
+        axum::http::Method::PATCH => Some(RequestMethod::Patch),
+        axum::http::Method::DELETE => Some(RequestMethod::Delete),
+        axum::http::Method::OPTIONS => Some(RequestMethod::Options),
+        _ => None,
+    }
+}
+
+fn forward_request_headers(headers: &HeaderMap) -> Vec<urspace_protocol::Header> {
+    headers
+        .iter()
+        .filter(|(name, _)| !is_gateway_hop_header(name.as_str()))
+        .filter_map(|(name, value)| {
+            value.to_str().ok().map(|value| urspace_protocol::Header {
+                name: name.as_str().to_owned(),
+                value: value.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn native_http_response(response: urspace_host::native_client::NativeResponse) -> Response<Body> {
+    let mut builder = Response::builder().status(response.status);
+    if let Some(content_type) = response.content_type
+        && let Ok(value) = axum::http::HeaderValue::from_str(&content_type)
+    {
+        builder = builder.header(header::CONTENT_TYPE, value);
+    }
+    for item in response.headers {
+        if is_gateway_hop_header(&item.name) || item.name.eq_ignore_ascii_case("content-type") {
+            continue;
+        }
+        if let (Ok(name), Ok(value)) = (
+            axum::http::HeaderName::from_bytes(item.name.as_bytes()),
+            axum::http::HeaderValue::from_str(&item.value),
+        ) {
+            builder = builder.header(name, value);
+        }
+    }
+    builder = builder
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .header("x-urspace-native", "1");
+    builder.body(Body::from(response.body)).unwrap_or_else(|_| {
+        local_error(
+            StatusCode::BAD_GATEWAY,
+            "Private site returned an invalid response",
+        )
+    })
+}
+
+fn local_error(status: StatusCode, message: &'static str) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(message))
+        .expect("static local error response is valid")
+}
+
+fn is_gateway_hop_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "host"
+            | "content-length"
+    )
+}
+
+async fn bridge_local_socket(socket: WebSocket, client: Arc<NativeSiteClient>, path: String) {
+    let Ok(mut mesh) = client.open_socket(path).await else {
+        let mut socket = socket;
+        let _ = socket
+            .send(AxumSocketMessage::Close(Some(CloseFrame {
+                code: 1011,
+                reason: "Private site connection failed".into(),
+            })))
+            .await;
+        return;
+    };
+    let (mut browser_send, mut browser_recv) = socket.split();
+    loop {
+        tokio::select! {
+            from_browser = browser_recv.next() => {
+                let Some(Ok(message)) = from_browser else { break };
+                let message = axum_to_socket_message(message);
+                let close = matches!(message, urspace_protocol::SocketMessage::Close { .. });
+                if send_socket_message(&mut mesh.send, &message).await.is_err() || close {
+                    break;
+                }
+            }
+            from_site = receive_socket_message(&mut mesh.recv) => {
+                let Ok(message) = from_site else { break };
+                let close = matches!(message, urspace_protocol::SocketMessage::Close { .. });
+                if browser_send.send(socket_message_to_axum(message)).await.is_err() || close {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn axum_to_socket_message(message: AxumSocketMessage) -> urspace_protocol::SocketMessage {
+    match message {
+        AxumSocketMessage::Text(text) => urspace_protocol::SocketMessage::Text(text.to_string()),
+        AxumSocketMessage::Binary(bytes) => urspace_protocol::SocketMessage::Binary(bytes.to_vec()),
+        AxumSocketMessage::Ping(bytes) => urspace_protocol::SocketMessage::Ping(bytes.to_vec()),
+        AxumSocketMessage::Pong(bytes) => urspace_protocol::SocketMessage::Pong(bytes.to_vec()),
+        AxumSocketMessage::Close(frame) => urspace_protocol::SocketMessage::Close {
+            code: frame.as_ref().map(|frame| frame.code),
+            reason: frame.map_or_else(String::new, |frame| frame.reason.to_string()),
+        },
+    }
+}
+
+fn socket_message_to_axum(message: urspace_protocol::SocketMessage) -> AxumSocketMessage {
+    match message {
+        urspace_protocol::SocketMessage::Text(text) => AxumSocketMessage::Text(text.into()),
+        urspace_protocol::SocketMessage::Binary(bytes) => AxumSocketMessage::Binary(bytes.into()),
+        urspace_protocol::SocketMessage::Ping(bytes) => AxumSocketMessage::Ping(bytes.into()),
+        urspace_protocol::SocketMessage::Pong(bytes) => AxumSocketMessage::Pong(bytes.into()),
+        urspace_protocol::SocketMessage::Close { code, reason } => {
+            AxumSocketMessage::Close(code.map(|code| CloseFrame {
+                code,
+                reason: reason.into(),
+            }))
+        }
+    }
+}
+
+fn public_site_handle(site_id: &str) -> String {
+    format!("site-{}", &blake3::hash(site_id.as_bytes()).to_hex()[..12])
 }
 
 async fn get(raw_invite: &str, requested_path: &str) -> Result<()> {
@@ -1449,6 +1801,16 @@ fn normalize_access_label(raw: &str) -> Result<String, String> {
         return Err("access label must contain 1-120 printable characters".into());
     }
     Ok(normalized.to_owned())
+}
+
+fn normalize_connect_listen(raw: &str) -> Result<SocketAddr, String> {
+    let address = raw
+        .parse::<SocketAddr>()
+        .map_err(|_| "listen must be a loopback IP address and port".to_owned())?;
+    if address.ip() != Ipv4Addr::LOCALHOST {
+        return Err("native gateways may listen only on 127.0.0.1".into());
+    }
+    Ok(address)
 }
 
 fn parse_duration(raw: &str) -> Result<Duration, String> {
@@ -1705,6 +2067,7 @@ mod tests {
                     name,
                     access_label,
                     max_sessions,
+                    direct,
                 },
         } = cli.command
         else {
@@ -1713,7 +2076,67 @@ mod tests {
         assert_eq!(name, "boxclub");
         assert_eq!(access_label.as_deref(), Some("Alice / work laptop"));
         assert_eq!(max_sessions, None);
+        assert!(!direct);
         assert!(normalize_access_label("bad\nlabel").is_err());
+    }
+
+    #[test]
+    fn native_connect_accepts_only_loopback_gateways() {
+        let cli = Cli::try_parse_from([
+            "urspace",
+            "connect",
+            "BoxClub",
+            "--invite-stdin",
+            "--listen",
+            "127.0.0.1:8080",
+        ])
+        .unwrap();
+        let Command::Connect {
+            name,
+            invite,
+            invite_stdin,
+            listen,
+        } = cli.command
+        else {
+            panic!("expected connect command");
+        };
+        assert_eq!(name, "boxclub");
+        assert!(invite.is_none());
+        assert!(invite_stdin);
+        assert_eq!(listen, Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 8080))));
+        assert!(
+            Cli::try_parse_from(["urspace", "connect", "boxclub", "--listen", "0.0.0.0:8080"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn local_gateway_requires_the_exact_random_authority() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "token.localhost:8080".parse().unwrap());
+        assert!(local_authority_matches(&headers, "token.localhost:8080"));
+        assert!(!local_authority_matches(
+            &headers,
+            "different.localhost:8080"
+        ));
+        assert!(!local_authority_matches(&headers, "token.localhost:8081"));
+    }
+
+    #[test]
+    fn native_websocket_messages_preserve_payloads_and_close_codes() {
+        let binary = urspace_protocol::SocketMessage::Binary(vec![1, 2, 3]);
+        assert_eq!(
+            axum_to_socket_message(socket_message_to_axum(binary.clone())),
+            binary
+        );
+        let close = urspace_protocol::SocketMessage::Close {
+            code: Some(1008),
+            reason: "revoked".into(),
+        };
+        assert_eq!(
+            axum_to_socket_message(socket_message_to_axum(close.clone())),
+            close
+        );
     }
 
     #[tokio::test]

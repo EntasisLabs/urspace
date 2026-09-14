@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::{SinkExt as _, StreamExt as _};
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
@@ -27,6 +28,8 @@ use urspace_protocol::{
     write_frame,
 };
 use uuid::Uuid;
+
+pub mod native_client;
 
 const MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 64;
 const MAX_REQUEST_BODY_BYTES: u64 = 16 * 1024 * 1024;
@@ -100,6 +103,12 @@ enum RegistryEvent {
         session_id: Uuid,
         session_public_key: [u8; 32],
         endpoint_id: [u8; 32],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_handle: Option<[u8; 8]>,
+    },
+    SessionOperatorHandleAssigned {
+        session_id: Uuid,
+        operator_handle: [u8; 8],
     },
     SessionEndpointUpdated {
         session_id: Uuid,
@@ -143,6 +152,7 @@ struct SessionRecord {
     session_public_key: [u8; 32],
     authorization_epoch: u64,
     endpoint_id: EndpointId,
+    operator_handle: [u8; 8],
     kicked: bool,
 }
 
@@ -163,6 +173,7 @@ struct RegistryState {
 pub struct SessionInfo {
     pub session_id: Uuid,
     pub endpoint_id: EndpointId,
+    pub operator_handle: String,
     pub connected: bool,
     pub access_label: Option<String>,
 }
@@ -214,12 +225,14 @@ impl CapabilityRegistry {
             0
         };
         let file = open_private_journal(path, valid_length)?;
-        Ok(Self {
+        let registry = Self {
             inner: Arc::new(Mutex::new(state)),
             journal: Some(Arc::new(RegistryJournal {
                 file: Mutex::new(file),
             })),
-        })
+        };
+        registry.assign_missing_operator_handles()?;
+        Ok(registry)
     }
 
     pub fn insert(
@@ -337,6 +350,7 @@ impl CapabilityRegistry {
             session_id,
             session_public_key,
             endpoint_id: *endpoint_id.as_bytes(),
+            operator_handle: Some(random_operator_handle(&guard)),
         };
         self.append_event(&event)?;
         apply_registry_event(&mut guard, event)?;
@@ -437,6 +451,7 @@ impl CapabilityRegistry {
                 (invite_active && !record.kicked).then_some(SessionInfo {
                     session_id: *session_id,
                     endpoint_id: record.endpoint_id,
+                    operator_handle: display_operator_handle(record.operator_handle),
                     connected: guard.active.contains_key(session_id),
                     access_label: guard
                         .invites
@@ -445,8 +460,28 @@ impl CapabilityRegistry {
                 })
             })
             .collect();
-        sessions.sort_by_key(|session| session.session_id);
+        sessions.sort_by(|left, right| left.operator_handle.cmp(&right.operator_handle));
         sessions
+    }
+
+    fn assign_missing_operator_handles(&self) -> Result<(), RegistryError> {
+        let mut guard = self.inner.lock().expect("capability registry poisoned");
+        let missing: Vec<_> = guard
+            .sessions
+            .iter()
+            .filter_map(|(session_id, record)| {
+                (record.operator_handle == [0_u8; 8]).then_some(*session_id)
+            })
+            .collect();
+        for session_id in missing {
+            let event = RegistryEvent::SessionOperatorHandleAssigned {
+                session_id,
+                operator_handle: random_operator_handle(&guard),
+            };
+            self.append_event(&event)?;
+            apply_registry_event(&mut guard, event)?;
+        }
+        Ok(())
     }
 
     pub fn kick(&self, session_id: Uuid) -> Result<bool, RegistryError> {
@@ -760,8 +795,18 @@ fn apply_registry_event(
             session_id,
             session_public_key,
             endpoint_id,
+            operator_handle,
         } => {
             if state.sessions.contains_key(&session_id) {
+                return Err(invalid_registry_event());
+            }
+            let operator_handle = operator_handle.unwrap_or([0_u8; 8]);
+            if operator_handle != [0_u8; 8]
+                && state
+                    .sessions
+                    .values()
+                    .any(|session| session.operator_handle == operator_handle)
+            {
                 return Err(invalid_registry_event());
             }
             let endpoint_id =
@@ -782,9 +827,31 @@ fn apply_registry_event(
                     session_public_key,
                     authorization_epoch: 0,
                     endpoint_id,
+                    operator_handle,
                     kicked: false,
                 },
             );
+        }
+        RegistryEvent::SessionOperatorHandleAssigned {
+            session_id,
+            operator_handle,
+        } => {
+            if operator_handle == [0_u8; 8]
+                || state
+                    .sessions
+                    .values()
+                    .any(|session| session.operator_handle == operator_handle)
+            {
+                return Err(invalid_registry_event());
+            }
+            let session = state
+                .sessions
+                .get_mut(&session_id)
+                .ok_or_else(invalid_registry_event)?;
+            if session.operator_handle != [0_u8; 8] {
+                return Err(invalid_registry_event());
+            }
+            session.operator_handle = operator_handle;
         }
         RegistryEvent::SessionEndpointUpdated {
             session_id,
@@ -886,6 +953,24 @@ fn validate_grant_record<'a>(
 
 fn capability_hash(capability: &[u8; 32]) -> [u8; 32] {
     *blake3::hash(capability).as_bytes()
+}
+
+fn random_operator_handle(state: &RegistryState) -> [u8; 8] {
+    loop {
+        let candidate: [u8; 8] = rand::rng().random();
+        if candidate != [0_u8; 8]
+            && !state
+                .sessions
+                .values()
+                .any(|session| session.operator_handle == candidate)
+        {
+            return candidate;
+        }
+    }
+}
+
+fn display_operator_handle(handle: [u8; 8]) -> String {
+    format!("session-{}", URL_SAFE_NO_PAD.encode(handle))
 }
 
 #[derive(Debug, Clone)]
@@ -1829,6 +1914,7 @@ mod tests {
                 100,
             )
             .unwrap();
+        let operator_handle = registry.sessions()[0].operator_handle.clone();
         assert!(registry.close_admissions(id).unwrap());
         let issued = grant(&host, id, session_id, *session_key.public().as_bytes());
         assert!(registry.resume(&issued, endpoint_b).is_ok());
@@ -1841,6 +1927,7 @@ mod tests {
             vec![SessionInfo {
                 session_id,
                 endpoint_id: endpoint_b,
+                operator_handle,
                 connected: false,
                 access_label: None,
             }]
@@ -1921,6 +2008,7 @@ mod tests {
             )
             .unwrap();
         registry.close_admissions(invite_id).unwrap();
+        let operator_handle = registry.sessions()[0].operator_handle.clone();
         drop(registry);
 
         let encoded = std::fs::read_to_string(&journal).unwrap();
@@ -1933,6 +2021,7 @@ mod tests {
             vec![SessionInfo {
                 session_id,
                 endpoint_id: endpoint,
+                operator_handle,
                 connected: false,
                 access_label: None,
             }]
@@ -1998,6 +2087,7 @@ mod tests {
                 100,
             )
             .unwrap();
+        let operator_handle = registry.sessions()[0].operator_handle.clone();
         drop(registry);
 
         let encoded = std::fs::read_to_string(&journal).unwrap();
@@ -2010,10 +2100,49 @@ mod tests {
             vec![SessionInfo {
                 session_id,
                 endpoint_id: endpoint,
+                operator_handle,
                 connected: false,
                 access_label: Some("Alice / work laptop".into()),
             }]
         );
+    }
+
+    #[test]
+    fn old_journals_receive_stable_random_operator_handles() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = directory.path().join("authorization.jsonl");
+        let invite_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let capability = [46_u8; 32];
+        let session_key = SecretKey::generate();
+        let endpoint = SecretKey::generate().public();
+
+        let registry = CapabilityRegistry::open(&journal).unwrap();
+        registry.insert(invite_id, &capability, 200, 1).unwrap();
+        let legacy_event = RegistryEvent::SessionAdmitted {
+            invite_id,
+            session_id,
+            session_public_key: *session_key.public().as_bytes(),
+            endpoint_id: *endpoint.as_bytes(),
+            operator_handle: None,
+        };
+        registry.append_event(&legacy_event).unwrap();
+        apply_registry_event(&mut registry.inner.lock().unwrap(), legacy_event).unwrap();
+        drop(registry);
+
+        let registry = CapabilityRegistry::open(&journal).unwrap();
+        let handle = registry.sessions()[0].operator_handle.clone();
+        assert!(handle.starts_with("session-"));
+        assert_eq!(handle.len(), 19);
+        drop(registry);
+        assert!(
+            std::fs::read_to_string(&journal)
+                .unwrap()
+                .contains("session_operator_handle_assigned")
+        );
+
+        let reopened = CapabilityRegistry::open(&journal).unwrap();
+        assert_eq!(reopened.sessions()[0].operator_handle, handle);
     }
 
     #[test]
@@ -2215,15 +2344,13 @@ mod tests {
         let body = response_recv.read_to_end(1024).await.unwrap();
         assert_eq!(body, b"mesh works");
 
-        assert_eq!(
-            registry.sessions(),
-            vec![SessionInfo {
-                session_id: admitted.session_id,
-                endpoint_id: client.id(),
-                connected: true,
-                access_label: None,
-            }]
-        );
+        let sessions = registry.sessions();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, admitted.session_id);
+        assert_eq!(sessions[0].endpoint_id, client.id());
+        assert!(sessions[0].operator_handle.starts_with("session-"));
+        assert!(sessions[0].connected);
+        assert_eq!(sessions[0].access_label, None);
         assert!(registry.kick(admitted.session_id).unwrap());
         tokio::time::timeout(Duration::from_secs(2), connection.closed())
             .await

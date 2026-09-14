@@ -18,6 +18,7 @@ blake3.workspace = true
 clap.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
+axum = { workspace = true, features = ["ws"] }
 hkdf.workspace = true
 iroh.workspace = true
 iroh-tickets.workspace = true

@@ -131,10 +131,10 @@ urspace service status boxclub
 urspace service start boxclub
 urspace service restart boxclub
 urspace service invite boxclub
-urspace service invite boxclub --for "Alice / work laptop"
+urspace service invite boxclub --for "Alice / work laptop" --direct
 urspace service invite boxclub --for "QA team" --max-sessions 4
 urspace service sessions boxclub
-urspace service kick boxclub <session-id>
+urspace service kick boxclub <session-handle>
 urspace service kick-all boxclub
 urspace service stop boxclub
 urspace service uninstall boxclub
@@ -148,7 +148,9 @@ journal and shown by `service sessions`; it is not sent to the browser or used a
 identity proof. Anyone holding the invitation can consume an available slot, so
 send each named invitation only to its intended recipient.
 
-The complete session UUID shown by `service sessions` is required for a kick.
+The independent random `session-…` handle shown by `service sessions` is required
+for a kick. Urspace deliberately does not print the underlying session UUID or
+browser endpoint identity into terminal or supervisor logs.
 The local control token is regenerated for each run and stored in a private file
 below the user's Urspace data directory. Set `URSPACE_DATA_DIR` to an absolute
 directory to relocate all Urspace identity and service state. Use the same
@@ -162,6 +164,45 @@ the same sharing settings; use a new name when intentionally creating a differen
 site authority. `service run` remains available as a foreground entry point for
 containers and custom supervisors. Automatic Windows service installation is not
 implemented yet.
+
+## Native device connection
+
+For a managed device, enroll once without executing the Cloudflare-hosted
+browser bootstrap:
+
+```bash
+urspace service invite boxclub --for "Alice / work laptop" --direct
+# On Alice's device:
+urspace connect boxclub --invite-stdin
+```
+
+The second command reads the invitation from standard input, verifies it
+locally, creates a distinct device proof key, and stores the host-signed grant
+and private key below the local Urspace data directory. The file is created with
+mode `0600` on Unix, inherits the user data directory's ACL on Windows, and is
+never printed. Urspace then serves a local URL such
+as `http://<random>.localhost:<port>/`; the random hostname is checked on every
+request so unrelated local or browser traffic cannot select the gateway by port
+alone.
+
+Reconnect later with:
+
+```bash
+urspace connect boxclub
+```
+
+The saved grant is not a bearer credential: the host sends a fresh challenge and
+requires a signature from the saved device key. A host-side kick takes effect on
+native devices exactly as it does for browsers. HTTP methods and WebSockets are
+bridged over Iroh. The first enrollment selects and saves a free local port, so
+later runs restore the same browser origin and retain that site's cookies and
+storage. The gateway binds only to `127.0.0.1`; `--listen` can select another
+loopback port for an advanced one-off override, which changes the browser origin.
+
+For non-interactive automation, `--invite URL` is available. Prefer
+`--invite-stdin` for people because command arguments may be retained in shell
+history or visible to same-user process inspection. Device keys currently rely
+on private filesystem permissions rather than an operating-system keychain.
 
 ## Browser compatibility
 

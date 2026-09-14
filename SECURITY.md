@@ -18,6 +18,7 @@ be used to confirm regressions but should not be assumed to receive patches.
 - Site endpoint private key
 - Unexpired invitation capabilities
 - Browser session proof private keys
+- Native device proof private keys
 - Unexpired short-link fragment seeds
 - Local named-service control tokens
 - Managed-service configuration and supervisor-definition integrity
@@ -172,6 +173,37 @@ Urspace data directory.
 - WebSocket upgrades are made only against the configured loopback authority.
 - Expiry and revocation are rechecked once per second on live WebSocket tunnels;
   a withdrawn grant closes the browser and upstream sides with policy code 1008.
+
+## Native managed-device boundary
+
+`urspace connect` verifies the signed invitation and Iroh endpoint locally. It
+creates a separate Ed25519 device proof key, persists that key and its signed
+non-bearer session grant in a user-only file, and proves possession against a
+fresh host challenge on every process restart. Invitation capabilities are
+zeroed after the admission request and are never written to the device file.
+The Cloudflare bootstrap, Worker, short-link resolver, and service worker do not
+participate in this path.
+
+The browser-facing gateway binds only to a numeric loopback address and requires
+an unpredictable 128-bit label in the `*.localhost` Host header. Requests with a
+different Host are rejected before proxying, and responses force a no-referrer
+policy so normal navigation does not disclose the local gateway origin. The
+random label is local access control, not remote authentication; processes with
+the same operating-system account are inside this local trust boundary. The
+enrollment also stores its selected loopback port so reconnects preserve the
+browser origin; an explicit `--listen` override changes that origin for the run.
+
+The current client protects device keys with atomic creation and mode `0600` on
+Unix; on Windows it relies on the user data directory's inherited ACL. It does
+not yet use macOS Keychain, Windows Credential Manager, or Linux Secret Service.
+A later hardening pass should add those backends while retaining an explicit
+file-based mode for headless machines.
+
+Owner-facing session listings expose only a separate random operator handle.
+It is generated independently rather than derived from the private session UUID.
+Raw session UUIDs and browser endpoint identities are not written to terminal or
+supervisor logs. The host resolves a handle back to live private state before a
+kick; the handle itself grants no access.
 
 ## Current limitations requiring hardening
 
