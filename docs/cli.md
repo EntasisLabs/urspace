@@ -79,6 +79,55 @@ also rotates the link, so the removed identity cannot reopen the bearer URL as a
 fresh browser session; a new URL is printed for future recipients. Press Ctrl+C
 to close the Iroh endpoint and every active session.
 
+## Named service mode
+
+Use service mode when an operating-system or container supervisor should keep a
+named local app running:
+
+```bash
+urspace service run localhost:8787 --name boxclub --short
+```
+
+`service run` accepts the same bootstrap, invitation lifetime, session limit,
+entry path, and short-link settings as `serve`. It requires a name because that
+name selects its persistent site identity, authorization journal, pinned Iroh
+relay, and local control endpoint.
+
+Each authorization change is appended and synced to disk before it takes effect.
+The journal contains capability hashes, invitation limits, public browser keys,
+endpoint identities, and revocation state. It never stores an invitation
+capability or browser private key. An incomplete final journal record left by a
+power loss is discarded during recovery; an inconsistent complete record fails
+startup instead of reconstructing authority from browser grants.
+
+On restart, service mode closes every previous invitation to new admissions and
+prints a fresh invitation. Previously admitted sessions remain authorized unless
+they were kicked or revoked. The service pins its selected relay so the exact
+signed reconnect route remains stable across restarts. Restart with the same
+`--bootstrap-origin` and `--entry-path`; changing either intentionally makes old
+session grants fail their exact-match checks.
+
+Use a second terminal to administer it over an authenticated loopback-only
+control connection:
+
+```text
+urspace service status boxclub
+urspace service invite boxclub
+urspace service sessions boxclub
+urspace service kick boxclub <session-id>
+urspace service kick-all boxclub
+urspace service stop boxclub
+```
+
+The complete session UUID shown by `service sessions` is required for a kick.
+The local control token is regenerated for each run and stored in a private file
+below the user's Urspace data directory. Set `URSPACE_DATA_DIR` to an absolute
+directory to relocate all Urspace identity and service state.
+
+Service mode currently runs in the foreground so a supervisor can observe its
+exit and restart it. Automatic systemd, launchd, and Windows service installation
+is planned but is not part of this release.
+
 ## Browser compatibility
 
 Chrome and Chromium are the primary tested browser path for the current preview.
