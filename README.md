@@ -160,13 +160,13 @@ urspace service restart boxclub
 urspace service invite boxclub
 urspace service invite boxclub --for "Alice / work laptop"
 urspace service sessions boxclub
-urspace service kick boxclub <session-id>
+urspace service kick boxclub <session-handle>
 urspace service kick-all boxclub
 urspace service stop boxclub
 urspace service uninstall boxclub
 ```
 
-`--for` makes a one-browser enrollment by default and puts that local label next
+`--for` makes a one-device enrollment by default and puts that local label next
 to the admitted session, so an owner can tell devices apart before kicking one.
 The label is deliberately not treated as proof that the person is Alice: whoever
 receives the secret invitation can claim that slot. A future organization login
@@ -176,6 +176,34 @@ Management commands require a private control token stored with your Urspace
 data. Uninstalling removes automatic startup but deliberately preserves the site
 identity and browser access list. Windows can run named services in the
 foreground but does not have automatic service installation yet.
+
+## Connect a managed device without Cloudflare
+
+An employee or another managed machine can enroll the native client once:
+
+```bash
+urspace connect boxclub --invite-stdin
+```
+
+Paste the one-time invitation created with `service invite --for … --direct`.
+Urspace verifies it locally, saves a device-bound proof key in a private file,
+and prints an unguessable `http://….localhost` URL for the browser. HTTP and
+WebSocket traffic travels from that local gateway over the encrypted Iroh
+connection. The Cloudflare bootstrap, service worker, and short-link service are
+not involved.
+
+On later runs, no invitation is needed:
+
+```bash
+urspace connect boxclub
+```
+
+The native device stays enrolled across browser and client restarts until the
+host kicks its session. Urspace also reuses the local port chosen during
+enrollment, preserving the site's browser cookies and storage. `--invite URL`
+is also available for automation, but
+`--invite-stdin` is preferred because it keeps the invitation out of shell
+history and the process list.
 
 ## Share a folder of static files
 
@@ -193,6 +221,7 @@ Urspace confines file access to that folder and serves the selected entry page.
 - Vite and React apps, client-side routes, and WebMCP tools
 - Static folders
 - Automatic reconnects and ordinary page refreshes for admitted browsers
+- Native managed-device connections that bypass the Cloudflare bootstrap
 - Expiring invitations, session limits, link rotation, and host-side kicking
 - Optional encrypted short links with automatic fallback to the full link
 
@@ -210,8 +239,9 @@ address.
 4. The host verifies the invitation and gives that browser its own signed
    session. The browser uses the session for refreshes and reconnects instead of
    reusing the original invitation.
-5. Session credentials stay in browser memory. Closing every tab forgets them
-   and requires an invitation again.
+5. On the no-install browser path, session credentials stay in browser memory.
+   Closing every tab forgets them and requires an invitation again. The native
+   `connect` path instead keeps a device proof key in a private local file.
 
 With a short link, the full invitation is encrypted on the host before its
 scrambled form is uploaded. The decryption secret stays after the `#` in the

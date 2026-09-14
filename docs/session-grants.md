@@ -183,6 +183,15 @@ The signed grant and session private key are separate recovery factors.
 The Cloudflare Worker serves generic immutable bootstrap code only. It does not
 store either recovery factor, terminate Iroh, or carry application traffic.
 
+## Native managed-device recovery
+
+`urspace connect` uses the same proof-bound grant but stores its device key in a
+private local file rather than handing it to the browser. A fresh client process
+can therefore resume after all pages and the previous process are gone. It
+verifies the grant locally, creates a fresh Iroh transport endpoint, answers the
+host's fresh challenge, and exposes only a random `*.localhost` gateway to the
+browser. The Cloudflare bootstrap and service worker do not participate.
+
 ## Required negative tests
 
 - bit-flipped payload and signature
