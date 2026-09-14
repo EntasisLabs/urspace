@@ -158,12 +158,19 @@ urspace service status boxclub
 urspace service start boxclub
 urspace service restart boxclub
 urspace service invite boxclub
+urspace service invite boxclub --for "Alice / work laptop"
 urspace service sessions boxclub
 urspace service kick boxclub <session-id>
 urspace service kick-all boxclub
 urspace service stop boxclub
 urspace service uninstall boxclub
 ```
+
+`--for` makes a one-browser enrollment by default and puts that local label next
+to the admitted session, so an owner can tell devices apart before kicking one.
+The label is deliberately not treated as proof that the person is Alice: whoever
+receives the secret invitation can claim that slot. A future organization login
+can verify the person while reusing the same host-side enrollment boundary.
 
 Management commands require a private control token stored with your Urspace
 data. Uninstalling removes automatic startup but deliberately preserves the site
