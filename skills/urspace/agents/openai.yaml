@@ -1,0 +1,4 @@
+interface:
+  display_name: "Urspace"
+  short_description: "Privately serve and mount local apps over Iroh"
+  default_prompt: "Use $urspace to securely share my local app with Urspace."
