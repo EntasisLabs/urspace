@@ -81,17 +81,33 @@ to close the Iroh endpoint and every active session.
 
 ## Named service mode
 
-Use service mode when an operating-system or container supervisor should keep a
-named local app running:
+Install a named local app as an operating-system user service:
 
 ```bash
-urspace service run localhost:8787 --name boxclub --short
+urspace service install localhost:8787 --name boxclub --short
 ```
 
-`service run` accepts the same bootstrap, invitation lifetime, session limit,
+`service install` accepts the same bootstrap, invitation lifetime, session limit,
 entry path, and short-link settings as `serve`. It requires a name because that
-name selects its persistent site identity, authorization journal, pinned Iroh
-relay, and local control endpoint.
+name selects its persistent site identity, service configuration, authorization
+journal, pinned Iroh relay, and local control endpoint.
+
+On macOS, Urspace installs a per-user launchd agent. On Linux, it installs a
+systemd user service. Both start immediately, return after failures, and start
+again when the user logs in. Linux servers that must start the user service at
+boot before login should enable lingering for that account:
+
+```bash
+loginctl enable-linger
+```
+
+Installing the service does not require root access; whether enabling Linux
+lingering needs administrator approval depends on the host's policy. The
+generated supervisor definition contains only the Urspace executable path, a
+validated service name, and the Urspace data directory. The local app and sharing
+options live in a private, versioned config file. A supervised process does not
+print invitation URLs into service logs; the installing or managing CLI returns
+them over the authenticated local control connection.
 
 Each authorization change is appended and synced to disk before it takes effect.
 The journal contains capability hashes, invitation limits, public browser keys,
@@ -112,21 +128,30 @@ control connection:
 
 ```text
 urspace service status boxclub
+urspace service start boxclub
+urspace service restart boxclub
 urspace service invite boxclub
 urspace service sessions boxclub
 urspace service kick boxclub <session-id>
 urspace service kick-all boxclub
 urspace service stop boxclub
+urspace service uninstall boxclub
 ```
 
 The complete session UUID shown by `service sessions` is required for a kick.
 The local control token is regenerated for each run and stored in a private file
 below the user's Urspace data directory. Set `URSPACE_DATA_DIR` to an absolute
-directory to relocate all Urspace identity and service state.
+directory to relocate all Urspace identity and service state. Use the same
+environment value when running later management commands; the installed service
+records it for its own restarts.
 
-Service mode currently runs in the foreground so a supervisor can observe its
-exit and restart it. Automatic systemd, launchd, and Windows service installation
-is planned but is not part of this release.
+`service stop` leaves the service installed, while `service uninstall` removes
+automatic startup. Both preserve the stable site identity, authorization
+journal, and admitted browser list. Reinstalling the same name therefore requires
+the same sharing settings; use a new name when intentionally creating a different
+site authority. `service run` remains available as a foreground entry point for
+containers and custom supervisors. Automatic Windows service installation is not
+implemented yet.
 
 ## Browser compatibility
 

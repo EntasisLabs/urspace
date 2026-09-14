@@ -22,10 +22,11 @@ use urspace_protocol::{
 };
 use uuid::Uuid;
 
+mod native_service;
 mod service;
 mod short_link;
 
-use service::{ControlAction, ControlResponse, ControlServer, SessionView};
+use service::{ControlAction, ControlResponse, ControlServer, ManagedServiceConfig, SessionView};
 use short_link::{DEFAULT_SHORT_ORIGIN, ShortLinkPublisher};
 
 const DEFAULT_BOOTSTRAP_ORIGIN: &str = "https://urspace.online";
@@ -112,6 +113,27 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ServiceCommand {
+    /// Install and start a named app as a user service.
+    Install {
+        /// Loopback app, for example localhost:8787.
+        #[arg(value_name = "LOCAL_APP", value_parser = normalize_loopback_app)]
+        app: String,
+        /// Stable name for this service and its local identity.
+        #[arg(long, value_parser = normalize_site_name)]
+        name: String,
+        #[arg(long, default_value = DEFAULT_BOOTSTRAP_ORIGIN)]
+        bootstrap_origin: String,
+        #[arg(long, default_value = DEFAULT_TTL, value_parser = parse_duration)]
+        ttl: Duration,
+        #[arg(long, default_value_t = DEFAULT_MAX_SESSIONS)]
+        max_sessions: u32,
+        #[arg(long, default_value = "/")]
+        entry_path: String,
+        #[arg(long)]
+        short: bool,
+        #[arg(long, default_value = DEFAULT_SHORT_ORIGIN, hide = true)]
+        short_origin: String,
+    },
     /// Run one named local app until stopped by a signal or control command.
     Run {
         /// Loopback app, for example localhost:8787.
@@ -138,6 +160,16 @@ enum ServiceCommand {
         #[arg(value_parser = normalize_site_name)]
         name: String,
     },
+    /// Start an installed named service.
+    Start {
+        #[arg(value_parser = normalize_site_name)]
+        name: String,
+    },
+    /// Restart an installed named service and create a fresh invitation.
+    Restart {
+        #[arg(value_parser = normalize_site_name)]
+        name: String,
+    },
     /// Create a fresh invitation for a running service.
     Invite {
         #[arg(value_parser = normalize_site_name)]
@@ -161,6 +193,17 @@ enum ServiceCommand {
     },
     /// Gracefully stop a running service.
     Stop {
+        #[arg(value_parser = normalize_site_name)]
+        name: String,
+    },
+    /// Remove automatic startup while preserving site identity and access state.
+    Uninstall {
+        #[arg(value_parser = normalize_site_name)]
+        name: String,
+    },
+    /// Internal supervisor entry point.
+    #[command(hide = true)]
+    ManagedRun {
         #[arg(value_parser = normalize_site_name)]
         name: String,
     },
@@ -234,6 +277,32 @@ async fn main() -> Result<()> {
         }
         Command::Get { invite_url, path } => get(&invite_url, &path).await,
         Command::Service { command } => match command {
+            ServiceCommand::Install {
+                app,
+                name,
+                bootstrap_origin,
+                ttl,
+                max_sessions,
+                entry_path,
+                short,
+                short_origin,
+            } => {
+                install_managed_service(
+                    app,
+                    name,
+                    ShareSettings {
+                        bootstrap_origin,
+                        ttl,
+                        max_sessions,
+                        entry_path,
+                        name: None,
+                        identity_file: None,
+                        short,
+                        short_origin,
+                    },
+                )
+                .await
+            }
             ServiceCommand::Run {
                 app,
                 name,
@@ -257,10 +326,13 @@ async fn main() -> Result<()> {
                         short,
                         short_origin,
                     },
+                    true,
                 )
                 .await
             }
-            ServiceCommand::Status { name } => service_request(&name, ControlAction::Status).await,
+            ServiceCommand::Status { name } => service_status(&name).await,
+            ServiceCommand::Start { name } => start_managed_service(&name).await,
+            ServiceCommand::Restart { name } => restart_managed_service(&name).await,
             ServiceCommand::Invite { name } => service_request(&name, ControlAction::Invite).await,
             ServiceCommand::Sessions { name } => {
                 service_request(&name, ControlAction::Sessions).await
@@ -271,7 +343,9 @@ async fn main() -> Result<()> {
             ServiceCommand::KickAll { name } => {
                 service_request(&name, ControlAction::KickAll).await
             }
-            ServiceCommand::Stop { name } => service_request(&name, ControlAction::Stop).await,
+            ServiceCommand::Stop { name } => stop_service(&name).await,
+            ServiceCommand::Uninstall { name } => uninstall_managed_service(&name).await,
+            ServiceCommand::ManagedRun { name } => run_managed_service(&name).await,
         },
     }
 }
@@ -299,6 +373,157 @@ async fn proxy(upstream: String, settings: ShareSettings) -> Result<()> {
             .transpose()?,
     )
     .await
+}
+
+async fn install_managed_service(
+    upstream: String,
+    name: String,
+    settings: ShareSettings,
+) -> Result<()> {
+    native_service::ensure_supported()?;
+    validate_share_settings(&settings)?;
+    let site = LoopbackSite::open(&upstream)?;
+    ensure_app_is_listening(site.origin()).await?;
+    ControlServer::ensure_available(&name).await?;
+
+    let config = ManagedServiceConfig::new(
+        upstream,
+        settings.bootstrap_origin,
+        settings.ttl.as_secs(),
+        settings.max_sessions,
+        settings.entry_path,
+        settings.short,
+        settings.short_origin,
+    );
+    service::save_managed_config(&name, &config)?;
+    let executable = std::env::current_exe().context("locate the Urspace executable")?;
+    let data_directory = service::data_directory()?;
+    let service_directory = service::service_directory(&name)?;
+    let outcome = native_service::install(&name, &executable, &data_directory, &service_directory)?;
+    await_service_ready(&name).await.with_context(|| {
+        format!(
+            "service was installed at {} but did not become ready",
+            outcome.definition_path.display()
+        )
+    })?;
+
+    println!("Installed and started Urspace service `{name}`.");
+    println!("Definition: {}", outcome.definition_path.display());
+    if let Some(note) = outcome.persistence_note {
+        println!("{note}");
+    }
+    service_request(&name, ControlAction::Invite).await
+}
+
+async fn run_managed_service(name: &str) -> Result<()> {
+    let config = service::load_managed_config(name)?;
+    run_service(
+        config.app,
+        name.to_owned(),
+        ShareSettings {
+            bootstrap_origin: config.bootstrap_origin,
+            ttl: Duration::from_secs(config.ttl_seconds),
+            max_sessions: config.max_sessions,
+            entry_path: config.entry_path,
+            name: None,
+            identity_file: None,
+            short: config.short,
+            short_origin: config.short_origin,
+        },
+        false,
+    )
+    .await
+}
+
+async fn service_status(name: &str) -> Result<()> {
+    match service::request(name, ControlAction::Status).await {
+        Ok(response) => print_service_response(response),
+        Err(_) if native_service::is_installed(name)? => {
+            println!("Service `{name}` is installed but is not accepting control requests.");
+            println!("Run `urspace service start {name}` to start it.");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn start_managed_service(name: &str) -> Result<()> {
+    native_service::start(name)?;
+    await_service_ready(name).await?;
+    println!("Started Urspace service `{name}`.");
+    service_request(name, ControlAction::Invite).await
+}
+
+async fn restart_managed_service(name: &str) -> Result<()> {
+    let _ = service::request(name, ControlAction::Stop).await;
+    native_service::restart(name)?;
+    await_service_ready(name).await?;
+    println!("Restarted Urspace service `{name}`.");
+    service_request(name, ControlAction::Invite).await
+}
+
+async fn stop_service(name: &str) -> Result<()> {
+    if !native_service::is_installed(name)? {
+        return service_request(name, ControlAction::Stop).await;
+    }
+    let _ = service::request(name, ControlAction::Stop).await;
+    native_service::stop(name)?;
+    println!("Stopped Urspace service `{name}`. It remains installed.");
+    Ok(())
+}
+
+async fn uninstall_managed_service(name: &str) -> Result<()> {
+    if !native_service::is_installed(name)? {
+        bail!("service `{name}` is not installed");
+    }
+    let _ = service::request(name, ControlAction::Stop).await;
+    let definition = native_service::uninstall(name)?;
+    println!("Uninstalled Urspace service `{name}` from automatic startup.");
+    println!("Removed definition: {}", definition.display());
+    println!("Its site identity and browser access state were preserved.");
+    Ok(())
+}
+
+async fn await_service_ready(name: &str) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    loop {
+        if service::request(name, ControlAction::Status)
+            .await
+            .is_ok_and(|response| response.ok)
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("timed out waiting for service `{name}` to become ready");
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn validate_share_settings(settings: &ShareSettings) -> Result<()> {
+    if settings.max_sessions == 0 {
+        bail!("max-sessions must be greater than zero");
+    }
+    let ttl_seconds =
+        i64::try_from(settings.ttl.as_secs()).context("invitation lifetime is too large")?;
+    let identity = SecretKey::generate();
+    let ticket = EndpointTicket::new(EndpointAddr::new(identity.public())).to_string();
+    sign_invite(
+        &identity,
+        InviteGrant {
+            bootstrap_origin: settings.bootstrap_origin.clone(),
+            endpoint_ticket: ticket,
+            invite_id: Uuid::new_v4(),
+            capability: [0_u8; 32],
+            expires_at_unix: unix_now().saturating_add(ttl_seconds),
+            entry_path: settings.entry_path.clone(),
+            max_sessions: settings.max_sessions,
+        },
+    )?;
+    if settings.short {
+        ShortLinkPublisher::new(&settings.short_origin)?;
+    }
+    Ok(())
 }
 
 struct ServiceRuntime {
@@ -407,12 +632,34 @@ impl ServiceRuntime {
     }
 }
 
-async fn run_service(upstream: String, name: String, settings: ShareSettings) -> Result<()> {
+async fn run_service(
+    upstream: String,
+    name: String,
+    settings: ShareSettings,
+    print_startup_invite: bool,
+) -> Result<()> {
     if settings.max_sessions == 0 {
         bail!("max-sessions must be greater than zero");
     }
     let ttl_seconds =
         i64::try_from(settings.ttl.as_secs()).context("invitation lifetime is too large")?;
+    let managed_config_path = service::managed_config_path(&name)?;
+    if managed_config_path.exists() {
+        let requested = ManagedServiceConfig::new(
+            upstream.clone(),
+            settings.bootstrap_origin.clone(),
+            settings.ttl.as_secs(),
+            settings.max_sessions,
+            settings.entry_path.clone(),
+            settings.short,
+            settings.short_origin.clone(),
+        );
+        if service::load_managed_config(&name)? != requested {
+            bail!(
+                "service `{name}` must use its installed settings to preserve existing browser access"
+            );
+        }
+    }
     let site = LoopbackSite::open(&upstream)?;
     ensure_app_is_listening(site.origin()).await?;
     ControlServer::ensure_available(&name).await?;
@@ -437,7 +684,11 @@ async fn run_service(upstream: String, name: String, settings: ShareSettings) ->
         .short
         .then(|| ShortLinkPublisher::new(&settings.short_origin))
         .transpose()?;
-    let share_url = publish_share_url(&raw_url, expires_at_unix, short_links.as_ref()).await;
+    let share_url = if print_startup_invite {
+        Some(publish_share_url(&raw_url, expires_at_unix, short_links.as_ref()).await)
+    } else {
+        None
+    };
     let issuer = SessionGrantIssuer::new(
         identity.clone(),
         settings.bootstrap_origin.clone(),
@@ -450,11 +701,17 @@ async fn run_service(upstream: String, name: String, settings: ShareSettings) ->
     let source_description = format!("app at {}", upstream.trim_end_matches('/'));
 
     println!("Urspace service `{name}` is running {source_description}");
-    println!("Share URL (treat it as a secret):\n{share_url}\n");
+    if let Some(share_url) = share_url {
+        println!("Share URL (treat it as a secret):\n{share_url}\n");
+    }
     println!("Site identity: {}", identity.public().to_z32());
     println!("Authorization changes are persisted before they take effect.");
-    println!("Manage it from another terminal with `urspace service status {name}`.");
-    println!("Press Ctrl+C or run `urspace service stop {name}` to stop.\n");
+    if print_startup_invite {
+        println!("Manage it from another terminal with `urspace service status {name}`.");
+        println!("Press Ctrl+C or run `urspace service stop {name}` to stop.\n");
+    } else {
+        println!("Running as an operating-system user service.\n");
+    }
 
     let mut runtime = ServiceRuntime {
         endpoint,
@@ -469,9 +726,11 @@ async fn run_service(upstream: String, name: String, settings: ShareSettings) ->
         current_raw_url: raw_url,
         source_description,
     };
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
-            signal = tokio::signal::ctrl_c() => {
+            signal = &mut shutdown => {
                 signal?;
                 break;
             }
@@ -493,6 +752,23 @@ async fn run_service(upstream: String, name: String, settings: ShareSettings) ->
     }
     router.shutdown().await?;
     Ok(())
+}
+
+async fn shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .context("listen for service termination")?;
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => signal.context("listen for Ctrl+C"),
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.context("listen for Ctrl+C")
+    }
 }
 
 async fn bind_service_endpoint(
@@ -531,6 +807,10 @@ async fn bind_service_endpoint(
 
 async fn service_request(name: &str, action: ControlAction) -> Result<()> {
     let response = service::request(name, action).await?;
+    print_service_response(response)
+}
+
+fn print_service_response(response: ControlResponse) -> Result<()> {
     if !response.ok {
         bail!(response.message);
     }
@@ -1202,6 +1482,28 @@ mod tests {
         let cli = Cli::try_parse_from([
             "urspace",
             "service",
+            "install",
+            "localhost:8787",
+            "--name",
+            "BoxClub",
+            "--short",
+        ])
+        .unwrap();
+        let Command::Service {
+            command: ServiceCommand::Install {
+                app, name, short, ..
+            },
+        } = cli.command
+        else {
+            panic!("expected service install command");
+        };
+        assert_eq!(app, "http://127.0.0.1:8787/");
+        assert_eq!(name, "boxclub");
+        assert!(short);
+
+        let cli = Cli::try_parse_from([
+            "urspace",
+            "service",
             "run",
             "localhost:8787",
             "--name",
@@ -1226,6 +1528,33 @@ mod tests {
                 .is_err()
         );
         assert!(Cli::try_parse_from(["urspace", "service", "run", "localhost:8787"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "urspace",
+                "service",
+                "install",
+                "example.com",
+                "--name",
+                "app"
+            ])
+            .is_err()
+        );
+        assert!(matches!(
+            Cli::try_parse_from(["urspace", "service", "start", "BoxClub"])
+                .unwrap()
+                .command,
+            Command::Service {
+                command: ServiceCommand::Start { name }
+            } if name == "boxclub"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["urspace", "service", "managed-run", "BoxClub"])
+                .unwrap()
+                .command,
+            Command::Service {
+                command: ServiceCommand::ManagedRun { name }
+            } if name == "boxclub"
+        ));
     }
 
     #[test]
