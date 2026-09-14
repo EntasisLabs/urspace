@@ -75,9 +75,11 @@ capability-isolated site origin for `site_id`.
 
 The grant contains public routing and authorization assertions but no bearer
 secret. Implementations must still avoid logging it because it identifies a
-private browsing relationship. The current CLI issues grants through the life
-of its in-memory host process; host kick, invite revocation, browser departure,
-or host restart ends the session instead of an arbitrary wall-clock timeout.
+private browsing relationship. Foreground sharing keeps authorization state in
+memory. Named service mode journals the host-side registry and pins the relay
+address embedded in grants, allowing admitted sessions to survive a host process
+restart without relaxing exact endpoint-ticket validation. Host kick, invite
+revocation, or browser departure remains authoritative.
 
 ## Admission handshake
 
@@ -149,7 +151,10 @@ The signed `authorization_epoch` must equal the registry value. Kicking a
 session marks it kicked and closes its current connection. Revoking an invite
 revokes all sessions admitted by it. A host that does not persist the registry
 must reject all old grants after restart; it must never reconstruct authority
-from a grant alone.
+from a grant alone. Named service mode persists registry mutations as a private
+append-only journal. It writes and syncs the event before changing live
+authorization state, restores only complete events, and never records capability
+plaintext or a browser private key.
 
 ## Browser and Worker recovery
 

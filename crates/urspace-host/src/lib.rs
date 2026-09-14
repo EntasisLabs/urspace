@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::fs::{File, OpenOptions};
 use std::io;
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -12,6 +14,7 @@ use iroh::{EndpointId, SecretKey};
 use percent_encoding::percent_decode_str;
 use rand::Rng as _;
 use reqwest::redirect::Policy;
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq as _;
 use tokio::sync::Semaphore;
 use tokio_tungstenite::tungstenite::Message;
@@ -30,6 +33,96 @@ const MAX_REQUEST_BODY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 const SESSION_CHALLENGE_TTL_SECONDS: i64 = 15;
 const SESSION_GRANT_EXPIRY_UNIX: i64 = i64::MAX;
+const MAX_JOURNAL_EVENT_BYTES: usize = 8 * 1024;
+
+#[derive(Debug)]
+pub enum RegistryError {
+    Denied(DenialCode),
+    Persistence(io::Error),
+}
+
+impl RegistryError {
+    fn denial_code(&self) -> DenialCode {
+        match self {
+            Self::Denied(code) => *code,
+            Self::Persistence(_) => DenialCode::Invalid,
+        }
+    }
+}
+
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Denied(code) => write!(formatter, "authorization denied: {code:?}"),
+            Self::Persistence(error) => write!(formatter, "persist authorization state: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Denied(_) => None,
+            Self::Persistence(error) => Some(error),
+        }
+    }
+}
+
+impl From<DenialCode> for RegistryError {
+    fn from(code: DenialCode) -> Self {
+        Self::Denied(code)
+    }
+}
+
+impl From<io::Error> for RegistryError {
+    fn from(error: io::Error) -> Self {
+        Self::Persistence(error)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+enum RegistryEvent {
+    InviteInserted {
+        invite_id: Uuid,
+        capability_hash: [u8; 32],
+        expires_at_unix: i64,
+        max_sessions: u32,
+    },
+    AdmissionsClosed {
+        invite_id: Uuid,
+    },
+    AllAdmissionsClosed,
+    SessionAdmitted {
+        invite_id: Uuid,
+        session_id: Uuid,
+        session_public_key: [u8; 32],
+        endpoint_id: [u8; 32],
+    },
+    SessionEndpointUpdated {
+        session_id: Uuid,
+        endpoint_id: [u8; 32],
+    },
+    SessionKicked {
+        session_id: Uuid,
+    },
+    SessionKickedAndAdmissionsClosed {
+        session_id: Uuid,
+        invite_id: Uuid,
+    },
+    AllSessionsKicked,
+    AllSessionsKickedAndAdmissionsClosed {
+        invite_id: Uuid,
+    },
+    InviteRevoked {
+        invite_id: Uuid,
+    },
+}
+
+#[derive(Debug)]
+struct RegistryJournal {
+    file: Mutex<File>,
+}
 
 #[derive(Debug, Clone)]
 struct InviteRecord {
@@ -83,32 +176,68 @@ impl AuthorizedSession {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CapabilityRegistry {
     inner: Arc<Mutex<RegistryState>>,
+    journal: Option<Arc<RegistryJournal>>,
+}
+
+impl Default for CapabilityRegistry {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(RegistryState::default())),
+            journal: None,
+        }
+    }
 }
 
 impl CapabilityRegistry {
+    /// Opens a registry backed by a crash-tolerant, append-only journal.
+    ///
+    /// The journal contains capability hashes, public browser keys, and
+    /// revocation state. It never contains invitation capabilities or browser
+    /// private keys.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create registry directory {}", parent.display()))?;
+        }
+        let mut state = RegistryState::default();
+        let valid_length = if path.exists() {
+            replay_registry_journal(path, &mut state)?
+        } else {
+            0
+        };
+        let file = open_private_journal(path, valid_length)?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(state)),
+            journal: Some(Arc::new(RegistryJournal {
+                file: Mutex::new(file),
+            })),
+        })
+    }
+
     pub fn insert(
         &self,
         invite_id: Uuid,
         capability: &[u8; 32],
         expires_at_unix: i64,
         max_sessions: u32,
-    ) {
-        let record = InviteRecord {
+    ) -> Result<(), RegistryError> {
+        let event = RegistryEvent::InviteInserted {
+            invite_id,
             capability_hash: capability_hash(capability),
             expires_at_unix,
-            remaining_sessions: max_sessions,
-            admitted_sessions: HashSet::new(),
-            admissions_closed: false,
-            revoked: false,
+            max_sessions,
         };
-        self.inner
-            .lock()
-            .expect("capability registry poisoned")
-            .invites
-            .insert(invite_id, record);
+        let mut guard = self.inner.lock().expect("capability registry poisoned");
+        if max_sessions == 0 || guard.invites.contains_key(&invite_id) {
+            return Err(invalid_registry_event());
+        }
+        self.append_event(&event)?;
+        apply_registry_event(&mut guard, event)?;
+        Ok(())
     }
 
     pub fn can_admit(
@@ -146,7 +275,7 @@ impl CapabilityRegistry {
         session_public_key: [u8; 32],
         endpoint_id: EndpointId,
         now_unix: i64,
-    ) -> Result<AuthorizedSession, DenialCode> {
+    ) -> Result<AuthorizedSession, RegistryError> {
         self.can_admit_locked(
             invite_id,
             capability,
@@ -165,40 +294,33 @@ impl CapabilityRegistry {
         session_public_key: [u8; 32],
         endpoint_id: EndpointId,
         now_unix: i64,
-    ) -> Result<AuthorizedSession, DenialCode> {
+    ) -> Result<AuthorizedSession, RegistryError> {
         let candidate_hash = capability_hash(capability);
         let mut guard = self.inner.lock().expect("capability registry poisoned");
         if guard.sessions.contains_key(&session_id) {
-            return Err(DenialCode::Invalid);
+            return Err(DenialCode::Invalid.into());
         }
-        let record = guard
-            .invites
-            .get_mut(&invite_id)
-            .ok_or(DenialCode::Invalid)?;
+        let record = guard.invites.get(&invite_id).ok_or(DenialCode::Invalid)?;
         if record.capability_hash.ct_eq(&candidate_hash).unwrap_u8() != 1 {
-            return Err(DenialCode::Invalid);
+            return Err(DenialCode::Invalid.into());
         }
         if record.revoked || record.admissions_closed {
-            return Err(DenialCode::Revoked);
+            return Err(DenialCode::Revoked.into());
         }
         if record.expires_at_unix <= now_unix {
-            return Err(DenialCode::Expired);
+            return Err(DenialCode::Expired.into());
         }
         if record.remaining_sessions == 0 {
-            return Err(DenialCode::SessionLimit);
+            return Err(DenialCode::SessionLimit.into());
         }
-        record.remaining_sessions -= 1;
-        record.admitted_sessions.insert(session_id);
-        guard.sessions.insert(
+        let event = RegistryEvent::SessionAdmitted {
+            invite_id,
             session_id,
-            SessionRecord {
-                invite_id,
-                session_public_key,
-                authorization_epoch: 0,
-                endpoint_id,
-                kicked: false,
-            },
-        );
+            session_public_key,
+            endpoint_id: *endpoint_id.as_bytes(),
+        };
+        self.append_event(&event)?;
+        apply_registry_event(&mut guard, event)?;
         Ok(AuthorizedSession {
             session_id,
             invite_id,
@@ -218,14 +340,15 @@ impl CapabilityRegistry {
         &self,
         grant: &urspace_protocol::SessionGrantPayload,
         endpoint_id: EndpointId,
-    ) -> Result<AuthorizedSession, DenialCode> {
+    ) -> Result<AuthorizedSession, RegistryError> {
         let mut guard = self.inner.lock().expect("capability registry poisoned");
         validate_grant_record(&guard, grant)?;
-        let record = guard
-            .sessions
-            .get_mut(&grant.session_id)
-            .ok_or(DenialCode::Invalid)?;
-        record.endpoint_id = endpoint_id;
+        let event = RegistryEvent::SessionEndpointUpdated {
+            session_id: grant.session_id,
+            endpoint_id: *endpoint_id.as_bytes(),
+        };
+        self.append_event(&event)?;
+        apply_registry_event(&mut guard, event)?;
         Ok(AuthorizedSession {
             session_id: grant.session_id,
             invite_id: grant.invite_id,
@@ -248,13 +371,38 @@ impl CapabilityRegistry {
             && record.endpoint_id == session.endpoint_id
     }
 
-    pub fn close_admissions(&self, invite_id: Uuid) -> bool {
+    pub fn close_admissions(&self, invite_id: Uuid) -> Result<bool, RegistryError> {
         let mut guard = self.inner.lock().expect("capability registry poisoned");
-        let Some(record) = guard.invites.get_mut(&invite_id) else {
-            return false;
+        if !guard.invites.contains_key(&invite_id) {
+            return Ok(false);
+        }
+        if guard
+            .invites
+            .get(&invite_id)
+            .is_some_and(|record| record.admissions_closed)
+        {
+            return Ok(true);
         };
-        record.admissions_closed = true;
-        true
+        let event = RegistryEvent::AdmissionsClosed { invite_id };
+        self.append_event(&event)?;
+        apply_registry_event(&mut guard, event)?;
+        Ok(true)
+    }
+
+    pub fn close_all_admissions(&self) -> Result<usize, RegistryError> {
+        let mut guard = self.inner.lock().expect("capability registry poisoned");
+        let count = guard
+            .invites
+            .values()
+            .filter(|record| !record.admissions_closed && !record.revoked)
+            .count();
+        if count == 0 {
+            return Ok(0);
+        }
+        let event = RegistryEvent::AllAdmissionsClosed;
+        self.append_event(&event)?;
+        apply_registry_event(&mut guard, event)?;
+        Ok(count)
     }
 
     pub fn sessions(&self) -> Vec<SessionInfo> {
@@ -278,16 +426,18 @@ impl CapabilityRegistry {
         sessions
     }
 
-    pub fn kick(&self, session_id: Uuid) -> bool {
+    pub fn kick(&self, session_id: Uuid) -> Result<bool, RegistryError> {
         let connection = {
             let mut guard = self.inner.lock().expect("capability registry poisoned");
-            let Some(record) = guard.sessions.get_mut(&session_id) else {
-                return false;
+            let Some(record) = guard.sessions.get(&session_id) else {
+                return Ok(false);
             };
             if record.kicked {
-                return false;
+                return Ok(false);
             }
-            record.kicked = true;
+            let event = RegistryEvent::SessionKicked { session_id };
+            self.append_event(&event)?;
+            apply_registry_event(&mut guard, event)?;
             guard
                 .active
                 .remove(&session_id)
@@ -296,19 +446,56 @@ impl CapabilityRegistry {
         if let Some(connection) = connection {
             connection.close(0_u8.into(), b"session kicked by host");
         }
-        true
+        Ok(true)
     }
 
-    pub fn kick_all(&self) -> usize {
+    pub fn kick_and_close_admissions(
+        &self,
+        session_id: Uuid,
+        invite_id: Uuid,
+    ) -> Result<bool, RegistryError> {
+        let connection = {
+            let mut guard = self.inner.lock().expect("capability registry poisoned");
+            let Some(record) = guard.sessions.get(&session_id) else {
+                return Ok(false);
+            };
+            if record.kicked {
+                return Ok(false);
+            }
+            if !guard.invites.contains_key(&invite_id) {
+                return Ok(false);
+            }
+            let event = RegistryEvent::SessionKickedAndAdmissionsClosed {
+                session_id,
+                invite_id,
+            };
+            self.append_event(&event)?;
+            apply_registry_event(&mut guard, event)?;
+            guard
+                .active
+                .remove(&session_id)
+                .map(|active| active.connection)
+        };
+        if let Some(connection) = connection {
+            connection.close(0_u8.into(), b"session kicked by host");
+        }
+        Ok(true)
+    }
+
+    pub fn kick_all(&self) -> Result<usize, RegistryError> {
         let (count, connections) = {
             let mut guard = self.inner.lock().expect("capability registry poisoned");
-            let mut count = 0;
-            for record in guard.sessions.values_mut() {
-                if !record.kicked {
-                    record.kicked = true;
-                    count += 1;
-                }
+            let count = guard
+                .sessions
+                .values()
+                .filter(|record| !record.kicked)
+                .count();
+            if count == 0 {
+                return Ok(0);
             }
+            let event = RegistryEvent::AllSessionsKicked;
+            self.append_event(&event)?;
+            apply_registry_event(&mut guard, event)?;
             let connections = guard
                 .active
                 .drain()
@@ -319,7 +506,37 @@ impl CapabilityRegistry {
         for connection in connections {
             connection.close(0_u8.into(), b"session kicked by host");
         }
-        count
+        Ok(count)
+    }
+
+    pub fn kick_all_and_close_admissions(&self, invite_id: Uuid) -> Result<usize, RegistryError> {
+        let (count, connections) = {
+            let mut guard = self.inner.lock().expect("capability registry poisoned");
+            if !guard.invites.contains_key(&invite_id) {
+                return Ok(0);
+            }
+            let count = guard
+                .sessions
+                .values()
+                .filter(|record| !record.kicked)
+                .count();
+            if count == 0 {
+                return Ok(0);
+            }
+            let event = RegistryEvent::AllSessionsKickedAndAdmissionsClosed { invite_id };
+            self.append_event(&event)?;
+            apply_registry_event(&mut guard, event)?;
+            let connections = guard
+                .active
+                .drain()
+                .map(|(_, active)| active.connection)
+                .collect::<Vec<_>>();
+            (count, connections)
+        };
+        for connection in connections {
+            connection.close(0_u8.into(), b"session kicked by host");
+        }
+        Ok(count)
     }
 
     fn session_connected(&self, session: AuthorizedSession, connection: Connection) {
@@ -367,13 +584,18 @@ impl CapabilityRegistry {
         }
     }
 
-    pub fn revoke(&self, invite_id: Uuid) -> bool {
+    pub fn revoke(&self, invite_id: Uuid) -> Result<bool, RegistryError> {
         let connections = {
             let mut guard = self.inner.lock().expect("capability registry poisoned");
-            let Some(record) = guard.invites.get_mut(&invite_id) else {
-                return false;
+            let Some(record) = guard.invites.get(&invite_id) else {
+                return Ok(false);
             };
-            record.revoked = true;
+            if record.revoked {
+                return Ok(true);
+            }
+            let event = RegistryEvent::InviteRevoked { invite_id };
+            self.append_event(&event)?;
+            apply_registry_event(&mut guard, event)?;
             let session_ids: Vec<_> = guard
                 .sessions
                 .iter()
@@ -390,8 +612,227 @@ impl CapabilityRegistry {
         for connection in connections {
             connection.close(0_u8.into(), b"invitation revoked by host");
         }
-        true
+        Ok(true)
     }
+
+    fn append_event(&self, event: &RegistryEvent) -> io::Result<()> {
+        let Some(journal) = &self.journal else {
+            return Ok(());
+        };
+        let mut encoded = serde_json::to_vec(event).map_err(io::Error::other)?;
+        if encoded.len() > MAX_JOURNAL_EVENT_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "authorization journal event is too large",
+            ));
+        }
+        encoded.push(b'\n');
+        let mut file = journal.file.lock().expect("registry journal poisoned");
+        file.write_all(&encoded)?;
+        file.sync_data()
+    }
+}
+
+fn replay_registry_journal(path: &Path, state: &mut RegistryState) -> Result<u64> {
+    let file = File::open(path)
+        .with_context(|| format!("open authorization journal {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut valid_length = 0_u64;
+    loop {
+        let mut line = Vec::new();
+        let bytes = reader
+            .read_until(b'\n', &mut line)
+            .with_context(|| format!("read authorization journal {}", path.display()))?;
+        if bytes == 0 {
+            break;
+        }
+        if line.len() > MAX_JOURNAL_EVENT_BYTES + 1 {
+            anyhow::bail!("authorization journal contains an oversized event");
+        }
+        if !line.ends_with(b"\n") {
+            // A power loss may leave the last append incomplete. Only complete,
+            // fsynced newline-delimited events are authoritative.
+            break;
+        }
+        line.pop();
+        let event: RegistryEvent = serde_json::from_slice(&line)
+            .with_context(|| format!("parse authorization journal {}", path.display()))?;
+        apply_registry_event(state, event)
+            .map_err(anyhow::Error::new)
+            .with_context(|| format!("replay authorization journal {}", path.display()))?;
+        valid_length = valid_length.saturating_add(bytes as u64);
+    }
+    Ok(valid_length)
+}
+
+fn open_private_journal(path: &Path, valid_length: u64) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true).read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("open authorization journal {}", path.display()))?;
+    let actual_length = file.metadata()?.len();
+    if actual_length != valid_length {
+        file.set_len(valid_length)
+            .with_context(|| format!("repair authorization journal {}", path.display()))?;
+        file.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let permissions = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, permissions)
+            .with_context(|| format!("secure authorization journal {}", path.display()))?;
+    }
+    Ok(file)
+}
+
+fn apply_registry_event(
+    state: &mut RegistryState,
+    event: RegistryEvent,
+) -> Result<(), RegistryError> {
+    match event {
+        RegistryEvent::InviteInserted {
+            invite_id,
+            capability_hash,
+            expires_at_unix,
+            max_sessions,
+        } => {
+            if max_sessions == 0 || state.invites.contains_key(&invite_id) {
+                return Err(invalid_registry_event());
+            }
+            state.invites.insert(
+                invite_id,
+                InviteRecord {
+                    capability_hash,
+                    expires_at_unix,
+                    remaining_sessions: max_sessions,
+                    admitted_sessions: HashSet::new(),
+                    admissions_closed: false,
+                    revoked: false,
+                },
+            );
+        }
+        RegistryEvent::AdmissionsClosed { invite_id } => {
+            state
+                .invites
+                .get_mut(&invite_id)
+                .ok_or_else(invalid_registry_event)?
+                .admissions_closed = true;
+        }
+        RegistryEvent::AllAdmissionsClosed => {
+            for invite in state.invites.values_mut() {
+                invite.admissions_closed = true;
+            }
+        }
+        RegistryEvent::SessionAdmitted {
+            invite_id,
+            session_id,
+            session_public_key,
+            endpoint_id,
+        } => {
+            if state.sessions.contains_key(&session_id) {
+                return Err(invalid_registry_event());
+            }
+            let endpoint_id =
+                EndpointId::from_bytes(&endpoint_id).map_err(|_| invalid_registry_event())?;
+            let invite = state
+                .invites
+                .get_mut(&invite_id)
+                .ok_or_else(invalid_registry_event)?;
+            if invite.remaining_sessions == 0 || invite.revoked || invite.admissions_closed {
+                return Err(invalid_registry_event());
+            }
+            invite.remaining_sessions -= 1;
+            invite.admitted_sessions.insert(session_id);
+            state.sessions.insert(
+                session_id,
+                SessionRecord {
+                    invite_id,
+                    session_public_key,
+                    authorization_epoch: 0,
+                    endpoint_id,
+                    kicked: false,
+                },
+            );
+        }
+        RegistryEvent::SessionEndpointUpdated {
+            session_id,
+            endpoint_id,
+        } => {
+            let endpoint_id =
+                EndpointId::from_bytes(&endpoint_id).map_err(|_| invalid_registry_event())?;
+            state
+                .sessions
+                .get_mut(&session_id)
+                .ok_or_else(invalid_registry_event)?
+                .endpoint_id = endpoint_id;
+        }
+        RegistryEvent::SessionKicked { session_id } => {
+            state
+                .sessions
+                .get_mut(&session_id)
+                .ok_or_else(invalid_registry_event)?
+                .kicked = true;
+        }
+        RegistryEvent::SessionKickedAndAdmissionsClosed {
+            session_id,
+            invite_id,
+        } => {
+            if !state.sessions.contains_key(&session_id) || !state.invites.contains_key(&invite_id)
+            {
+                return Err(invalid_registry_event());
+            }
+            state
+                .sessions
+                .get_mut(&session_id)
+                .expect("session existence checked")
+                .kicked = true;
+            state
+                .invites
+                .get_mut(&invite_id)
+                .expect("invite existence checked")
+                .admissions_closed = true;
+        }
+        RegistryEvent::AllSessionsKicked => {
+            for session in state.sessions.values_mut() {
+                session.kicked = true;
+            }
+        }
+        RegistryEvent::AllSessionsKickedAndAdmissionsClosed { invite_id } => {
+            if !state.invites.contains_key(&invite_id) {
+                return Err(invalid_registry_event());
+            }
+            for session in state.sessions.values_mut() {
+                session.kicked = true;
+            }
+            state
+                .invites
+                .get_mut(&invite_id)
+                .expect("invite existence checked")
+                .admissions_closed = true;
+        }
+        RegistryEvent::InviteRevoked { invite_id } => {
+            state
+                .invites
+                .get_mut(&invite_id)
+                .ok_or_else(invalid_registry_event)?
+                .revoked = true;
+        }
+    }
+    Ok(())
+}
+
+fn invalid_registry_event() -> RegistryError {
+    RegistryError::Persistence(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "authorization journal is inconsistent",
+    ))
 }
 
 fn validate_grant_record<'a>(
@@ -660,7 +1101,7 @@ impl SiteProtocol {
         let authorization = if proof_valid {
             pending.finalize(&self.registry, connection.remote_id(), unix_now())
         } else {
-            Err(DenialCode::Invalid)
+            Err(RegistryError::Denied(DenialCode::Invalid))
         };
         let mut granted_session = None;
         let reply = match authorization {
@@ -670,13 +1111,20 @@ impl SiteProtocol {
                     ServerHelloV4::Granted { session_grant }
                 }
                 Err(_) => {
-                    self.registry.kick(session.session_id());
+                    let _ = self.registry.kick(session.session_id());
                     ServerHelloV4::Denied {
                         code: DenialCode::Invalid,
                     }
                 }
             },
-            Err(code) => ServerHelloV4::Denied { code },
+            Err(error) => {
+                if matches!(error, RegistryError::Persistence(_)) {
+                    eprintln!("Urspace could not persist an authorization change: {error}");
+                }
+                ServerHelloV4::Denied {
+                    code: error.denial_code(),
+                }
+            }
         };
         write_frame(&mut hello_send, &reply)
             .await
@@ -764,8 +1212,8 @@ impl SiteProtocol {
                 session_id: pending.session_id(),
                 session_public_key: *pending.session_public_key(),
                 issued_at_unix: now_unix,
-                // Browser grants remain valid for the lifetime of this in-memory host
-                // session. Kick, invite revocation, and host restart are authoritative.
+                // The host registry is authoritative for grant lifetime. Foreground
+                // registries disappear on restart; named services restore theirs.
                 expires_at_unix: SESSION_GRANT_EXPIRY_UNIX,
                 authorization_epoch: pending.authorization_epoch(),
                 entry_path: self.issuer.entry_path.clone(),
@@ -851,7 +1299,7 @@ impl PendingAuthorization {
         registry: &CapabilityRegistry,
         endpoint_id: EndpointId,
         now_unix: i64,
-    ) -> Result<AuthorizedSession, DenialCode> {
+    ) -> Result<AuthorizedSession, RegistryError> {
         match self {
             Self::Admit {
                 invite_id,
@@ -1244,7 +1692,7 @@ mod tests {
         let session_key = SecretKey::generate();
         let endpoint_a = SecretKey::generate().public();
         let endpoint_b = SecretKey::generate().public();
-        registry.insert(id, &capability, 200, 1);
+        registry.insert(id, &capability, 200, 1).unwrap();
 
         assert_eq!(
             registry.can_admit(id, &[8_u8; 32], 100),
@@ -1273,19 +1721,19 @@ mod tests {
             registry.can_admit(id, &capability, 200),
             Err(DenialCode::Expired)
         );
-        assert!(registry.revoke(id));
+        assert!(registry.revoke(id).unwrap());
         assert!(!registry.session_is_active(resumed));
 
         let revoked_id = Uuid::new_v4();
-        registry.insert(revoked_id, &capability, 200, 2);
-        assert!(registry.revoke(revoked_id));
+        registry.insert(revoked_id, &capability, 200, 2).unwrap();
+        assert!(registry.revoke(revoked_id).unwrap());
         assert_eq!(
             registry.can_admit(revoked_id, &capability, 100),
             Err(DenialCode::Revoked)
         );
 
         let expired_id = Uuid::new_v4();
-        registry.insert(expired_id, &capability, 100, 1);
+        registry.insert(expired_id, &capability, 100, 1).unwrap();
         assert_eq!(
             registry.can_admit(expired_id, &capability, 100),
             Err(DenialCode::Expired)
@@ -1297,7 +1745,7 @@ mod tests {
         let registry = CapabilityRegistry::default();
         let invite_id = Uuid::new_v4();
         let capability = [14_u8; 32];
-        registry.insert(invite_id, &capability, 200, 1);
+        registry.insert(invite_id, &capability, 200, 1).unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(3));
 
         let attempts = [0_u8, 1_u8].map(|seed| {
@@ -1325,7 +1773,9 @@ mod tests {
         assert_eq!(
             results
                 .iter()
-                .filter(|result| matches!(result, Err(DenialCode::SessionLimit)))
+                .filter(|result| {
+                    matches!(result, Err(RegistryError::Denied(DenialCode::SessionLimit)))
+                })
                 .count(),
             1
         );
@@ -1342,7 +1792,7 @@ mod tests {
         let session_key = SecretKey::generate();
         let endpoint_a = SecretKey::generate().public();
         let endpoint_b = SecretKey::generate().public();
-        registry.insert(id, &capability, 200, 2);
+        registry.insert(id, &capability, 200, 2).unwrap();
 
         registry
             .admit(
@@ -1354,7 +1804,7 @@ mod tests {
                 100,
             )
             .unwrap();
-        assert!(registry.close_admissions(id));
+        assert!(registry.close_admissions(id).unwrap());
         let issued = grant(&host, id, session_id, *session_key.public().as_bytes());
         assert!(registry.resume(&issued, endpoint_b).is_ok());
         assert_eq!(
@@ -1383,7 +1833,7 @@ mod tests {
         let session_b_id = Uuid::new_v4();
         let endpoint_a = SecretKey::generate().public();
         let endpoint_b = SecretKey::generate().public();
-        registry.insert(id, &capability, 200, 2);
+        registry.insert(id, &capability, 200, 2).unwrap();
 
         registry
             .admit(
@@ -1405,20 +1855,134 @@ mod tests {
                 100,
             )
             .unwrap();
-        assert!(registry.kick(session_a_id));
+        assert!(registry.kick(session_a_id).unwrap());
         let issued = grant(&host, id, session_a_id, *session_a.public().as_bytes());
-        assert_eq!(
+        assert!(matches!(
             registry.resume(&issued, endpoint_a),
-            Err(DenialCode::Revoked)
-        );
+            Err(RegistryError::Denied(DenialCode::Revoked))
+        ));
         assert_eq!(registry.sessions().len(), 1);
-        assert_eq!(registry.kick_all(), 1);
+        assert_eq!(registry.kick_all().unwrap(), 1);
         assert!(registry.sessions().is_empty());
         let issued = grant(&host, id, session_b_id, *session_b.public().as_bytes());
-        assert_eq!(
+        assert!(matches!(
             registry.resume(&issued, endpoint_b),
+            Err(RegistryError::Denied(DenialCode::Revoked))
+        ));
+    }
+
+    #[test]
+    fn authorization_journal_restores_sessions_and_revocations_without_bearer_secrets() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = directory.path().join("authorization.jsonl");
+        let invite_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let capability = [42_u8; 32];
+        let session_key = SecretKey::generate();
+        let endpoint = SecretKey::generate().public();
+        let host = SecretKey::generate();
+
+        let registry = CapabilityRegistry::open(&journal).unwrap();
+        registry.insert(invite_id, &capability, 200, 2).unwrap();
+        registry
+            .admit(
+                invite_id,
+                &capability,
+                session_id,
+                *session_key.public().as_bytes(),
+                endpoint,
+                100,
+            )
+            .unwrap();
+        registry.close_admissions(invite_id).unwrap();
+        drop(registry);
+
+        let encoded = std::fs::read_to_string(&journal).unwrap();
+        assert!(encoded.contains("capability_hash"));
+        assert!(!encoded.contains("\"capability\":"));
+
+        let registry = CapabilityRegistry::open(&journal).unwrap();
+        assert_eq!(
+            registry.sessions(),
+            vec![SessionInfo {
+                session_id,
+                endpoint_id: endpoint,
+                connected: false,
+            }]
+        );
+        assert_eq!(
+            registry.can_admit(invite_id, &capability, 100),
             Err(DenialCode::Revoked)
         );
+        let issued = grant(
+            &host,
+            invite_id,
+            session_id,
+            *session_key.public().as_bytes(),
+        );
+        assert!(registry.can_resume(&issued).is_ok());
+        let current_invite_id = Uuid::new_v4();
+        registry
+            .insert(current_invite_id, &capability, 200, 1)
+            .unwrap();
+        registry
+            .kick_and_close_admissions(session_id, current_invite_id)
+            .unwrap();
+        drop(registry);
+
+        let registry = CapabilityRegistry::open(&journal).unwrap();
+        assert_eq!(
+            registry.can_admit(current_invite_id, &capability, 100),
+            Err(DenialCode::Revoked)
+        );
+        assert!(matches!(
+            registry.resume(&issued, endpoint),
+            Err(RegistryError::Denied(DenialCode::Revoked))
+        ));
+    }
+
+    #[test]
+    fn authorization_journal_discards_an_incomplete_final_append() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = directory.path().join("authorization.jsonl");
+        let invite_id = Uuid::new_v4();
+        let capability = [43_u8; 32];
+        let registry = CapabilityRegistry::open(&journal).unwrap();
+        registry.insert(invite_id, &capability, 200, 1).unwrap();
+        drop(registry);
+
+        let valid_length = std::fs::metadata(&journal).unwrap().len();
+        let mut file = OpenOptions::new().append(true).open(&journal).unwrap();
+        file.write_all(b"{\"event\":\"session_").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let registry = CapabilityRegistry::open(&journal).unwrap();
+        assert_eq!(std::fs::metadata(&journal).unwrap().len(), valid_length);
+        assert!(registry.can_admit(invite_id, &capability, 100).is_ok());
+    }
+
+    #[test]
+    fn authorization_journal_rejects_a_tampered_complete_event() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = directory.path().join("authorization.jsonl");
+        let invite_id = Uuid::new_v4();
+        let registry = CapabilityRegistry::open(&journal).unwrap();
+        registry.insert(invite_id, &[44_u8; 32], 200, 1).unwrap();
+        drop(registry);
+
+        let mut file = OpenOptions::new().append(true).open(&journal).unwrap();
+        file.write_all(
+            format!(
+                "{{\"event\":\"admissions_closed\",\"invite_id\":\"{invite_id}\",\"unexpected\":true}}\n"
+            )
+            .as_bytes(),
+        )
+            .unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        assert!(CapabilityRegistry::open(&journal).is_err());
     }
 
     #[tokio::test]
@@ -1490,7 +2054,9 @@ mod tests {
         let registry = CapabilityRegistry::default();
         let invite_id = Uuid::new_v4();
         let capability = [11_u8; 32];
-        registry.insert(invite_id, &capability, unix_now() + 60, 1);
+        registry
+            .insert(invite_id, &capability, unix_now() + 60, 1)
+            .unwrap();
 
         let identity = SecretKey::generate();
         let server = Endpoint::builder(presets::Minimal)
@@ -1582,7 +2148,7 @@ mod tests {
                 connected: true,
             }]
         );
-        assert!(registry.kick(admitted.session_id));
+        assert!(registry.kick(admitted.session_id).unwrap());
         tokio::time::timeout(Duration::from_secs(2), connection.closed())
             .await
             .unwrap();
@@ -1601,7 +2167,9 @@ mod tests {
         let registry = CapabilityRegistry::default();
         let invite_id = Uuid::new_v4();
         let capability = [13_u8; 32];
-        registry.insert(invite_id, &capability, unix_now() + 60, 1);
+        registry
+            .insert(invite_id, &capability, unix_now() + 60, 1)
+            .unwrap();
 
         let identity = SecretKey::generate();
         let server = Endpoint::builder(presets::Minimal)
@@ -1664,7 +2232,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(registry.kick(admitted.session_id));
+        assert!(registry.kick(admitted.session_id).unwrap());
         tokio::time::timeout(Duration::from_secs(2), second_connection.closed())
             .await
             .unwrap();
@@ -1691,5 +2259,125 @@ mod tests {
         second.close().await;
         third.close().await;
         router.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persisted_grant_resumes_after_host_restart_with_stable_ticket() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = directory.path().join("authorization.jsonl");
+        let root = directory.path().join("site");
+        tokio::fs::create_dir(&root).await.unwrap();
+        tokio::fs::write(root.join("index.html"), "mesh survives restart")
+            .await
+            .unwrap();
+
+        let identity = SecretKey::generate();
+        let stable_ticket =
+            EndpointTicket::new(iroh::EndpointAddr::new(identity.public())).to_string();
+        let invite_id = Uuid::new_v4();
+        let capability = [15_u8; 32];
+        let session_key = SecretKey::generate();
+
+        let first_registry = CapabilityRegistry::open(&journal).unwrap();
+        first_registry
+            .insert(invite_id, &capability, unix_now() + 60, 1)
+            .unwrap();
+        let first_server = Endpoint::builder(presets::Minimal)
+            .secret_key(identity.clone())
+            .bind()
+            .await
+            .unwrap();
+        let first_addr = first_server.addr();
+        let first_router = Router::builder(first_server)
+            .accept(
+                ALPN,
+                SiteProtocol::new(
+                    first_registry.clone(),
+                    StaticSite::open(&root).await.unwrap(),
+                    SessionGrantIssuer::new(
+                        identity.clone(),
+                        "https://sites.example".into(),
+                        stable_ticket.clone(),
+                        "/".into(),
+                    ),
+                ),
+            )
+            .spawn();
+        let first_client = Endpoint::bind(presets::Minimal).await.unwrap();
+        let first_connection = first_client.connect(first_addr, ALPN).await.unwrap();
+        let grant = authorize_v4(
+            &first_connection,
+            first_client.id(),
+            &identity,
+            &session_key,
+            ClientAuthV4::Admit {
+                invite_id,
+                capability,
+                session_public_key: *session_key.public().as_bytes(),
+            },
+            None,
+        )
+        .await;
+        let admitted = verify_session_grant(&grant, unix_now()).unwrap();
+        first_client.close().await;
+        first_router.shutdown().await.unwrap();
+        drop(first_registry);
+
+        let restarted_registry = CapabilityRegistry::open(&journal).unwrap();
+        let restarted_server = Endpoint::builder(presets::Minimal)
+            .secret_key(identity.clone())
+            .bind()
+            .await
+            .unwrap();
+        let restarted_addr = restarted_server.addr();
+        let restarted_router = Router::builder(restarted_server)
+            .accept(
+                ALPN,
+                SiteProtocol::new(
+                    restarted_registry.clone(),
+                    StaticSite::open(&root).await.unwrap(),
+                    SessionGrantIssuer::new(
+                        identity.clone(),
+                        "https://sites.example".into(),
+                        stable_ticket,
+                        "/".into(),
+                    ),
+                ),
+            )
+            .spawn();
+        let restarted_client = Endpoint::bind(presets::Minimal).await.unwrap();
+        let restarted_connection = restarted_client
+            .connect(restarted_addr, ALPN)
+            .await
+            .unwrap();
+        let refreshed_grant = authorize_v4(
+            &restarted_connection,
+            restarted_client.id(),
+            &identity,
+            &session_key,
+            ClientAuthV4::Resume {
+                session_grant: grant.clone(),
+            },
+            Some(&grant),
+        )
+        .await;
+
+        assert_eq!(
+            verify_session_grant(&refreshed_grant, unix_now())
+                .unwrap()
+                .session_id,
+            admitted.session_id
+        );
+        assert_eq!(
+            restarted_registry.sessions()[0].session_id,
+            admitted.session_id
+        );
+        assert_eq!(
+            restarted_registry.sessions()[0].endpoint_id,
+            restarted_client.id()
+        );
+
+        restarted_client.close().await;
+        restarted_router.shutdown().await.unwrap();
     }
 }

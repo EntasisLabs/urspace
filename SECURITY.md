@@ -19,8 +19,10 @@ be used to confirm regressions but should not be assumed to receive patches.
 - Unexpired invitation capabilities
 - Browser session proof private keys
 - Unexpired short-link fragment seeds
+- Local named-service control tokens
 - Files below the explicitly shared site root
-- Integrity of the endpoint identity, route, bootstrap origin, and grant limits
+- Integrity of the endpoint identity, route, authorization journal, bootstrap
+  origin, and grant limits
 
 ## Invitation invariants
 
@@ -115,6 +117,28 @@ the generic bootstrap and does not store the grant, proof key, or application
 traffic. See [docs/session-grants.md](docs/session-grants.md) for the complete
 wire contract.
 
+## Named service state and control
+
+Named service mode persists an append-only authorization journal containing
+capability hashes, invitation limits, public session keys, endpoint identities,
+and revocation state. It never writes capability plaintext, a signed grant, or a
+browser private key. Mutations are appended and synced before the live registry
+changes. Recovery truncates an incomplete final append and rejects inconsistent
+complete events.
+
+The service pins the relay address included in its signed session grants so the
+exact endpoint ticket remains stable across host process restarts. Startup closes
+all earlier invitations to new admissions before minting a new one; admitted
+sessions retain their state. It does not weaken signer, origin, entry-path, or
+endpoint-ticket matching during resume.
+
+Management uses a loopback-only TCP listener authenticated by a new random
+256-bit token for every service run. The listener address and token are kept in a
+private file below the user's Urspace data directory and removed on graceful
+shutdown. Requests and responses are size- and time-limited. Anyone able to read
+the service owner's files or process memory is already inside this local trust
+boundary.
+
 ## Loopback proxy boundary
 
 - `urspace serve` canonicalizes shorthand such as `localhost:8787` before Iroh
@@ -150,10 +174,13 @@ wire contract.
   rejects traversal and ordinary symlink escapes but is not yet safe against a
   malicious local writer racing path resolution. Replace it with capability-based
   directory handles before serving attacker-writable trees.
-- Capability and admitted-session state are memory-only. Restarting the host
-  invalidates every invite and session grant (fail closed). Live rotation and
-  revocation are available only through the foreground host console; there is
-  not yet an authenticated management socket.
+- Foreground `serve` and `static` authorization state remains memory-only and
+  rejects old grants after restart. Named `service run` mode persists loopback-app
+  authorization and exposes authenticated local management, but automatic
+  systemd, launchd, and Windows service installation is not implemented yet.
+- Named services pin one relay for route continuity. Relay migration and
+  redundant signed routes are not implemented yet.
+- The authorization journal is append-only and does not compact old events yet.
 - The browser and loopback proxy buffer each HTTP response up to 64 MiB. Streaming
   responses, SSE, uploads larger than 16 MiB, and stricter content-specific
   limits are not yet supported.

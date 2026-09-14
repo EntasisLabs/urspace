@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Parser, Subcommand};
 use iroh::protocol::Router;
-use iroh::{Endpoint, SecretKey, endpoint::presets};
+use iroh::{Endpoint, EndpointAddr, RelayMode, RelayUrl, SecretKey, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
 use rand::Rng as _;
 use tokio::io::AsyncBufReadExt as _;
@@ -22,8 +22,10 @@ use urspace_protocol::{
 };
 use uuid::Uuid;
 
+mod service;
 mod short_link;
 
+use service::{ControlAction, ControlResponse, ControlServer, SessionView};
 use short_link::{DEFAULT_SHORT_ORIGIN, ShortLinkPublisher};
 
 const DEFAULT_BOOTSTRAP_ORIGIN: &str = "https://urspace.online";
@@ -94,12 +96,73 @@ enum Command {
         #[arg(long, default_value = DEFAULT_SHORT_ORIGIN, hide = true)]
         short_origin: String,
     },
+    /// Run or control an always-on named Urspace service.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     /// Fetch a path with the native protocol client.
     #[command(hide = true)]
     Get {
         invite_url: String,
         #[arg(default_value = "/")]
         path: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    /// Run one named local app until stopped by a signal or control command.
+    Run {
+        /// Loopback app, for example localhost:8787.
+        #[arg(value_name = "LOCAL_APP", value_parser = normalize_loopback_app)]
+        app: String,
+        /// Stable name for this service and its local identity.
+        #[arg(long, value_parser = normalize_site_name)]
+        name: String,
+        #[arg(long, default_value = DEFAULT_BOOTSTRAP_ORIGIN)]
+        bootstrap_origin: String,
+        #[arg(long, default_value = DEFAULT_TTL, value_parser = parse_duration)]
+        ttl: Duration,
+        #[arg(long, default_value_t = DEFAULT_MAX_SESSIONS)]
+        max_sessions: u32,
+        #[arg(long, default_value = "/")]
+        entry_path: String,
+        #[arg(long)]
+        short: bool,
+        #[arg(long, default_value = DEFAULT_SHORT_ORIGIN, hide = true)]
+        short_origin: String,
+    },
+    /// Show whether a named service is running.
+    Status {
+        #[arg(value_parser = normalize_site_name)]
+        name: String,
+    },
+    /// Create a fresh invitation for a running service.
+    Invite {
+        #[arg(value_parser = normalize_site_name)]
+        name: String,
+    },
+    /// List browsers admitted to a running service.
+    Sessions {
+        #[arg(value_parser = normalize_site_name)]
+        name: String,
+    },
+    /// Disconnect and revoke one admitted browser session.
+    Kick {
+        #[arg(value_parser = normalize_site_name)]
+        name: String,
+        session_id: String,
+    },
+    /// Disconnect and revoke every admitted browser session.
+    KickAll {
+        #[arg(value_parser = normalize_site_name)]
+        name: String,
+    },
+    /// Gracefully stop a running service.
+    Stop {
+        #[arg(value_parser = normalize_site_name)]
+        name: String,
     },
 }
 
@@ -170,6 +233,46 @@ async fn main() -> Result<()> {
             .await
         }
         Command::Get { invite_url, path } => get(&invite_url, &path).await,
+        Command::Service { command } => match command {
+            ServiceCommand::Run {
+                app,
+                name,
+                bootstrap_origin,
+                ttl,
+                max_sessions,
+                entry_path,
+                short,
+                short_origin,
+            } => {
+                run_service(
+                    app,
+                    name,
+                    ShareSettings {
+                        bootstrap_origin,
+                        ttl,
+                        max_sessions,
+                        entry_path,
+                        name: None,
+                        identity_file: None,
+                        short,
+                        short_origin,
+                    },
+                )
+                .await
+            }
+            ServiceCommand::Status { name } => service_request(&name, ControlAction::Status).await,
+            ServiceCommand::Invite { name } => service_request(&name, ControlAction::Invite).await,
+            ServiceCommand::Sessions { name } => {
+                service_request(&name, ControlAction::Sessions).await
+            }
+            ServiceCommand::Kick { name, session_id } => {
+                service_request(&name, ControlAction::Kick { session_id }).await
+            }
+            ServiceCommand::KickAll { name } => {
+                service_request(&name, ControlAction::KickAll).await
+            }
+            ServiceCommand::Stop { name } => service_request(&name, ControlAction::Stop).await,
+        },
     }
 }
 
@@ -196,6 +299,266 @@ async fn proxy(upstream: String, settings: ShareSettings) -> Result<()> {
             .transpose()?,
     )
     .await
+}
+
+struct ServiceRuntime {
+    endpoint: Endpoint,
+    identity: SecretKey,
+    registry: CapabilityRegistry,
+    bootstrap_origin: String,
+    ttl_seconds: i64,
+    max_sessions: u32,
+    entry_path: String,
+    short_links: Option<ShortLinkPublisher>,
+    current_invite_id: Uuid,
+    current_raw_url: url::Url,
+    source_description: String,
+}
+
+impl ServiceRuntime {
+    async fn handle(&mut self, action: ControlAction) -> Result<(ControlResponse, bool)> {
+        match action {
+            ControlAction::Status => {
+                let mut response = ControlResponse::success("service is running");
+                response.site_id = Some(self.identity.public().to_z32());
+                response.source = Some(self.source_description.clone());
+                response.sessions = self.session_views();
+                Ok((response, false))
+            }
+            ControlAction::Invite => {
+                let url = self.rotate_invite().await?;
+                let mut response = ControlResponse::success(
+                    "created a fresh invitation; previously admitted browsers remain authorized",
+                );
+                response.share_url = Some(url.to_string());
+                Ok((response, false))
+            }
+            ControlAction::Sessions => {
+                let mut response = ControlResponse::success("admitted browser sessions");
+                response.sessions = self.session_views();
+                Ok((response, false))
+            }
+            ControlAction::Kick { session_id } => {
+                let session_id = Uuid::parse_str(&session_id)
+                    .context("session id must be the complete UUID shown by `service sessions`")?;
+                if !self
+                    .registry
+                    .kick_and_close_admissions(session_id, self.current_invite_id)?
+                {
+                    bail!("no active admitted session has that id");
+                }
+                let url = self.replace_closed_invite().await?;
+                let mut response = ControlResponse::success(
+                    "browser session revoked and outstanding invitation rotated",
+                );
+                response.share_url = Some(url.to_string());
+                Ok((response, false))
+            }
+            ControlAction::KickAll => {
+                let count = self
+                    .registry
+                    .kick_all_and_close_admissions(self.current_invite_id)?;
+                let mut response = ControlResponse::success(format!(
+                    "revoked {count} admitted browser session(s)"
+                ));
+                if count > 0 {
+                    response.share_url = Some(self.replace_closed_invite().await?.to_string());
+                }
+                Ok((response, false))
+            }
+            ControlAction::Stop => Ok((
+                ControlResponse::success("service is stopping gracefully"),
+                true,
+            )),
+        }
+    }
+
+    fn session_views(&self) -> Vec<SessionView> {
+        self.registry
+            .sessions()
+            .into_iter()
+            .map(|session| SessionView {
+                session_id: session.session_id.to_string(),
+                endpoint_id: session.endpoint_id.to_z32(),
+                connected: session.connected,
+            })
+            .collect()
+    }
+
+    async fn rotate_invite(&mut self) -> Result<url::Url> {
+        self.registry.close_admissions(self.current_invite_id)?;
+        self.replace_closed_invite().await
+    }
+
+    async fn replace_closed_invite(&mut self) -> Result<url::Url> {
+        replace_closed_invite(
+            &self.endpoint,
+            &self.identity,
+            &self.registry,
+            &self.bootstrap_origin,
+            self.ttl_seconds,
+            self.max_sessions,
+            &self.entry_path,
+            self.short_links.as_ref(),
+            &mut self.current_invite_id,
+            &mut self.current_raw_url,
+        )
+        .await
+    }
+}
+
+async fn run_service(upstream: String, name: String, settings: ShareSettings) -> Result<()> {
+    if settings.max_sessions == 0 {
+        bail!("max-sessions must be greater than zero");
+    }
+    let ttl_seconds =
+        i64::try_from(settings.ttl.as_secs()).context("invitation lifetime is too large")?;
+    let site = LoopbackSite::open(&upstream)?;
+    ensure_app_is_listening(site.origin()).await?;
+    ControlServer::ensure_available(&name).await?;
+    let identity_path = identity_path(None, Some(&name), site.origin())?;
+    let identity = load_or_create_identity(&identity_path)?;
+    let service_directory = service::service_directory(&name)?;
+    let registry = CapabilityRegistry::open(service_directory.join("authorization.jsonl"))?;
+    let (endpoint, stable_ticket) =
+        bind_service_endpoint(&identity, &service_directory.join("relay.txt")).await?;
+    let control = ControlServer::bind(&name, &identity.public().to_z32()).await?;
+    registry.close_all_admissions()?;
+    let (invite_id, raw_url, expires_at_unix) = mint_invite(
+        &endpoint,
+        &identity,
+        &registry,
+        &settings.bootstrap_origin,
+        ttl_seconds,
+        settings.max_sessions,
+        &settings.entry_path,
+    )?;
+    let short_links = settings
+        .short
+        .then(|| ShortLinkPublisher::new(&settings.short_origin))
+        .transpose()?;
+    let share_url = publish_share_url(&raw_url, expires_at_unix, short_links.as_ref()).await;
+    let issuer = SessionGrantIssuer::new(
+        identity.clone(),
+        settings.bootstrap_origin.clone(),
+        stable_ticket,
+        settings.entry_path.clone(),
+    );
+    let router = Router::builder(endpoint.clone())
+        .accept(ALPN, SiteProtocol::loopback(registry.clone(), site, issuer))
+        .spawn();
+    let source_description = format!("app at {}", upstream.trim_end_matches('/'));
+
+    println!("Urspace service `{name}` is running {source_description}");
+    println!("Share URL (treat it as a secret):\n{share_url}\n");
+    println!("Site identity: {}", identity.public().to_z32());
+    println!("Authorization changes are persisted before they take effect.");
+    println!("Manage it from another terminal with `urspace service status {name}`.");
+    println!("Press Ctrl+C or run `urspace service stop {name}` to stop.\n");
+
+    let mut runtime = ServiceRuntime {
+        endpoint,
+        identity,
+        registry,
+        bootstrap_origin: settings.bootstrap_origin,
+        ttl_seconds,
+        max_sessions: settings.max_sessions,
+        entry_path: settings.entry_path,
+        short_links,
+        current_invite_id: invite_id,
+        current_raw_url: raw_url,
+        source_description,
+    };
+    loop {
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal?;
+                break;
+            }
+            accepted = control.accept() => {
+                let (mut stream, action) = accepted?;
+                let result = runtime.handle(action).await;
+                let (response, stop) = match result {
+                    Ok(result) => result,
+                    Err(error) => (ControlResponse::failure(error.to_string()), false),
+                };
+                // The authenticated action remains authoritative even if the
+                // local caller disconnects before reading its response.
+                let _ = service::send_response(&mut stream, &response).await;
+                if stop {
+                    break;
+                }
+            }
+        }
+    }
+    router.shutdown().await?;
+    Ok(())
+}
+
+async fn bind_service_endpoint(
+    identity: &SecretKey,
+    relay_path: &Path,
+) -> Result<(Endpoint, String)> {
+    let pinned_relay = match std::fs::read_to_string(relay_path) {
+        Ok(raw) => Some(
+            raw.trim()
+                .parse::<RelayUrl>()
+                .context("parse pinned service relay")?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read pinned service relay {}", relay_path.display()));
+        }
+    };
+    let mut builder = Endpoint::builder(presets::N0).secret_key(identity.clone());
+    if let Some(relay) = &pinned_relay {
+        builder = builder.relay_mode(RelayMode::custom([relay.clone()]));
+    }
+    let endpoint = builder.bind().await.context("bind Iroh service endpoint")?;
+    tokio::time::timeout(Duration::from_secs(30), endpoint.online())
+        .await
+        .context("timed out connecting to the pinned Iroh relay")?;
+    let relay = pinned_relay
+        .or_else(|| endpoint.addr().relay_urls().next().cloned())
+        .context("Iroh service did not select a relay; a relay is required for browser sessions")?;
+    if !relay_path.exists() {
+        write_private_file(relay_path, relay.to_string().as_bytes())?;
+    }
+    let stable_addr = EndpointAddr::new(identity.public()).with_relay_url(relay);
+    Ok((endpoint, EndpointTicket::new(stable_addr).to_string()))
+}
+
+async fn service_request(name: &str, action: ControlAction) -> Result<()> {
+    let response = service::request(name, action).await?;
+    if !response.ok {
+        bail!(response.message);
+    }
+    println!("{}", response.message);
+    if let Some(source) = response.source {
+        println!("Source: {source}");
+    }
+    if let Some(site_id) = response.site_id {
+        println!("Site identity: {site_id}");
+    }
+    if response.sessions.is_empty() {
+        if response.message == "admitted browser sessions" {
+            println!("No browser sessions have been admitted.");
+        }
+    } else {
+        for session in response.sessions {
+            let state = if session.connected {
+                "connected"
+            } else {
+                "disconnected (may reconnect)"
+            };
+            println!("{}  {}  {state}", session.session_id, session.endpoint_id);
+        }
+    }
+    if let Some(url) = response.share_url {
+        println!("Share URL (treat it as a secret):\n{url}");
+    }
+    Ok(())
 }
 
 async fn serve_static(root: PathBuf, settings: ShareSettings) -> Result<()> {
@@ -340,7 +703,7 @@ fn mint_invite(
         },
     )?;
     let url = invite_url(&encoded)?;
-    registry.insert(invite_id, &capability, expires_at_unix, max_sessions);
+    registry.insert(invite_id, &capability, expires_at_unix, max_sessions)?;
     Ok((invite_id, url, expires_at_unix))
 }
 
@@ -402,7 +765,7 @@ async fn operator_console(
             "raw" => println!("Direct capability URL (treat it as a secret):\n{current_raw_url}"),
             "sessions" => print_sessions(&registry),
             "kick all" => {
-                let count = registry.kick_all();
+                let count = registry.kick_all()?;
                 println!("Kicked {count} admitted session(s).");
                 if count > 0 {
                     let url = rotate_invite(
@@ -430,7 +793,7 @@ async fn operator_console(
                 println!("kick all        disconnect and deny every admitted browser identity");
             }
             command if command.starts_with("kick ") => {
-                if kick_session(&registry, command[5..].trim()) {
+                if kick_session(&registry, command[5..].trim())? {
                     let url = rotate_invite(
                         &endpoint,
                         &identity,
@@ -466,6 +829,38 @@ async fn rotate_invite(
     current_invite_id: &mut Uuid,
     current_raw_url: &mut url::Url,
 ) -> Result<url::Url> {
+    // Close the bearer URL before creating its replacement. If signing or
+    // persistence fails, admissions fail closed instead of leaving the old
+    // invitation usable after an operator requested rotation.
+    registry.close_admissions(*current_invite_id)?;
+    replace_closed_invite(
+        endpoint,
+        identity,
+        registry,
+        bootstrap_origin,
+        ttl_seconds,
+        max_sessions,
+        entry_path,
+        short_links,
+        current_invite_id,
+        current_raw_url,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn replace_closed_invite(
+    endpoint: &Endpoint,
+    identity: &SecretKey,
+    registry: &CapabilityRegistry,
+    bootstrap_origin: &str,
+    ttl_seconds: i64,
+    max_sessions: u32,
+    entry_path: &str,
+    short_links: Option<&ShortLinkPublisher>,
+    current_invite_id: &mut Uuid,
+    current_raw_url: &mut url::Url,
+) -> Result<url::Url> {
     let (next_invite_id, raw_url, expires_at_unix) = mint_invite(
         endpoint,
         identity,
@@ -476,7 +871,6 @@ async fn rotate_invite(
         entry_path,
     )?;
     let share_url = publish_share_url(&raw_url, expires_at_unix, short_links).await;
-    registry.close_admissions(*current_invite_id);
     *current_invite_id = next_invite_id;
     *current_raw_url = raw_url;
     Ok(share_url)
@@ -498,10 +892,10 @@ fn print_sessions(registry: &CapabilityRegistry) {
     }
 }
 
-fn kick_session(registry: &CapabilityRegistry, prefix: &str) -> bool {
+fn kick_session(registry: &CapabilityRegistry, prefix: &str) -> Result<bool> {
     if prefix.is_empty() {
         println!("Usage: kick <session-id-prefix>");
-        return false;
+        return Ok(false);
     }
     let matches: Vec<_> = registry
         .sessions()
@@ -511,19 +905,19 @@ fn kick_session(registry: &CapabilityRegistry, prefix: &str) -> bool {
     match matches.as_slice() {
         [] => {
             println!("No admitted session matches `{prefix}`.");
-            false
+            Ok(false)
         }
         [session] => {
-            if registry.kick(session.session_id) {
+            if registry.kick(session.session_id)? {
                 println!("Kicked the selected browser session.");
-                true
+                Ok(true)
             } else {
-                false
+                Ok(false)
             }
         }
         _ => {
             println!("Session prefix `{prefix}` is ambiguous; enter more characters.");
-            false
+            Ok(false)
         }
     }
 }
@@ -718,13 +1112,11 @@ fn identity_path(
     if let Some(path) = explicit {
         return Ok(path);
     }
-    let base = dirs::data_local_dir().context("local data directory is unavailable")?;
     let key = name.map_or_else(
         || blake3::hash(source_key.as_bytes()).to_hex().to_string(),
         str::to_owned,
     );
-    Ok(base
-        .join("urspace")
+    Ok(service::data_directory()?
         .join("sites")
         .join(format!("{key}.key")))
 }
@@ -763,7 +1155,7 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     }
     let mut file = options
         .open(path)
-        .with_context(|| format!("create identity {}", path.display()))?;
+        .with_context(|| format!("create private file {}", path.display()))?;
     file.write_all(contents)?;
     file.sync_all()?;
     Ok(())
@@ -803,6 +1195,37 @@ mod tests {
             panic!("expected serve command");
         };
         assert!(short);
+    }
+
+    #[test]
+    fn named_service_commands_are_explicit_and_loopback_only() {
+        let cli = Cli::try_parse_from([
+            "urspace",
+            "service",
+            "run",
+            "localhost:8787",
+            "--name",
+            "BoxClub",
+            "--short",
+        ])
+        .unwrap();
+        let Command::Service {
+            command: ServiceCommand::Run {
+                app, name, short, ..
+            },
+        } = cli.command
+        else {
+            panic!("expected service run command");
+        };
+        assert_eq!(app, "http://127.0.0.1:8787/");
+        assert_eq!(name, "boxclub");
+        assert!(short);
+
+        assert!(
+            Cli::try_parse_from(["urspace", "service", "run", "example.com", "--name", "app"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["urspace", "service", "run", "localhost:8787"]).is_err());
     }
 
     #[test]

@@ -132,6 +132,35 @@ enter until it expires, reaches its session limit, or you rotate it.
 
 See [the CLI guide](docs/cli.md) for every option.
 
+## Keep a named app running
+
+For a site managed by a process supervisor, run the named service mode:
+
+```bash
+urspace service run localhost:8787 --name boxclub --short
+```
+
+Unlike a one-off `urspace serve` process, this mode remembers who you allowed. If
+the process crashes or restarts, old invite links stop accepting new people, but
+browsers that were already let in can reconnect. Kicked browsers stay kicked.
+Urspace does not save the secret from an invite link or a browser's private key.
+
+Manage the running service from another terminal:
+
+```bash
+urspace service status boxclub
+urspace service invite boxclub
+urspace service sessions boxclub
+urspace service kick boxclub <session-id>
+urspace service kick-all boxclub
+urspace service stop boxclub
+```
+
+Management commands require a private control token stored with your Urspace
+data. Service mode is ready to be kept alive by systemd, launchd, a container,
+or another process manager. Automatic operating-system service installation is
+not included yet.
+
 ## Share a folder of static files
 
 ```bash
