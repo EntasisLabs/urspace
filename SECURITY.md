@@ -20,6 +20,7 @@ be used to confirm regressions but should not be assumed to receive patches.
 - Browser session proof private keys
 - Unexpired short-link fragment seeds
 - Local named-service control tokens
+- Managed-service configuration and supervisor-definition integrity
 - Files below the explicitly shared site root
 - Integrity of the endpoint identity, route, authorization journal, bootstrap
   origin, and grant limits
@@ -139,6 +140,15 @@ shutdown. Requests and responses are size- and time-limited. Anyone able to read
 the service owner's files or process memory is already inside this local trust
 boundary.
 
+`service install` stores sharing settings in a private, versioned config and
+generates a per-user launchd or systemd definition. Supervisor definitions use an
+argument array or quoted unit arguments and contain no invitation capability,
+session grant, or control token. Supervised runs do not print invitations into
+service logs; invitation creation remains an authenticated local control action.
+Generated systemd units enable `NoNewPrivileges`, a private temporary directory,
+read-only system and home views, and persistent write access only to the selected
+Urspace data directory.
+
 ## Loopback proxy boundary
 
 - `urspace serve` canonicalizes shorthand such as `localhost:8787` before Iroh
@@ -175,9 +185,10 @@ boundary.
   malicious local writer racing path resolution. Replace it with capability-based
   directory handles before serving attacker-writable trees.
 - Foreground `serve` and `static` authorization state remains memory-only and
-  rejects old grants after restart. Named `service run` mode persists loopback-app
-  authorization and exposes authenticated local management, but automatic
-  systemd, launchd, and Windows service installation is not implemented yet.
+  rejects old grants after restart. Named services persist loopback-app
+  authorization and expose authenticated local management. Automatic service
+  installation supports per-user launchd on macOS and systemd on Linux; Windows
+  installation and privileged system-wide services are not implemented yet.
 - Named services pin one relay for route continuity. Relay migration and
   redundant signed routes are not implemented yet.
 - The authorization journal is append-only and does not compact old events yet.

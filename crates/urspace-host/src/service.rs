@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
 const CONTROL_VERSION: u8 = 1;
+const MANAGED_CONFIG_VERSION: u8 = 1;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -46,6 +47,42 @@ pub struct ControlResponse {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<SessionView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedServiceConfig {
+    version: u8,
+    pub app: String,
+    pub bootstrap_origin: String,
+    pub ttl_seconds: u64,
+    pub max_sessions: u32,
+    pub entry_path: String,
+    pub short: bool,
+    pub short_origin: String,
+}
+
+impl ManagedServiceConfig {
+    pub fn new(
+        app: String,
+        bootstrap_origin: String,
+        ttl_seconds: u64,
+        max_sessions: u32,
+        entry_path: String,
+        short: bool,
+        short_origin: String,
+    ) -> Self {
+        Self {
+            version: MANAGED_CONFIG_VERSION,
+            app,
+            bootstrap_origin,
+            ttl_seconds,
+            max_sessions,
+            entry_path,
+            short,
+            short_origin,
+        }
+    }
 }
 
 impl ControlResponse {
@@ -224,6 +261,50 @@ pub fn service_directory(name: &str) -> Result<PathBuf> {
     Ok(data_directory()?.join("services").join(name))
 }
 
+pub fn managed_config_path(name: &str) -> Result<PathBuf> {
+    Ok(service_directory(name)?.join("service.json"))
+}
+
+pub fn save_managed_config(name: &str, config: &ManagedServiceConfig) -> Result<PathBuf> {
+    let path = managed_config_path(name)?;
+    save_managed_config_at(&path, name, config)?;
+    Ok(path)
+}
+
+fn save_managed_config_at(path: &Path, name: &str, config: &ManagedServiceConfig) -> Result<()> {
+    if path.exists() {
+        let existing = load_managed_config_at(path)?;
+        if existing == *config {
+            return Ok(());
+        }
+        bail!(
+            "service `{name}` already has different settings; use a new name to preserve existing browser access"
+        );
+    }
+    let mut encoded = serde_json::to_vec_pretty(config).context("encode managed service config")?;
+    encoded.push(b'\n');
+    write_private_new(path, &encoded)
+}
+
+pub fn load_managed_config(name: &str) -> Result<ManagedServiceConfig> {
+    let path = managed_config_path(name)?;
+    load_managed_config_at(&path)
+}
+
+fn load_managed_config_at(path: &Path) -> Result<ManagedServiceConfig> {
+    let encoded = std::fs::read(path)
+        .with_context(|| format!("read managed service config {}", path.display()))?;
+    if encoded.len() > MAX_CONTROL_MESSAGE_BYTES {
+        bail!("managed service config is too large");
+    }
+    let config: ManagedServiceConfig =
+        serde_json::from_slice(&encoded).context("parse managed service config")?;
+    if config.version != MANAGED_CONFIG_VERSION {
+        bail!("managed service config version is unsupported");
+    }
+    Ok(config)
+}
+
 pub fn data_directory() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("URSPACE_DATA_DIR") {
         let path = PathBuf::from(path);
@@ -337,6 +418,58 @@ mod tests {
             URL_SAFE_NO_PAD.encode([9_u8; 32])
         );
         assert!(serde_json::from_str::<ControlRequest>(&request).is_err());
+    }
+
+    #[test]
+    fn managed_config_is_versioned_and_rejects_unknown_fields() {
+        let config = ManagedServiceConfig::new(
+            "http://127.0.0.1:8787/".into(),
+            "https://urspace.online".into(),
+            3_600,
+            4,
+            "/".into(),
+            true,
+            "https://u.urspace.online".into(),
+        );
+        let encoded = serde_json::to_string(&config).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ManagedServiceConfig>(&encoded).unwrap(),
+            config
+        );
+        let with_unknown = encoded.replacen("{", "{\"unexpected\":true,", 1);
+        assert!(serde_json::from_str::<ManagedServiceConfig>(&with_unknown).is_err());
+    }
+
+    #[test]
+    fn managed_config_is_private_idempotent_and_immutable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("service.json");
+        let config = ManagedServiceConfig::new(
+            "http://127.0.0.1:8787/".into(),
+            "https://urspace.online".into(),
+            3_600,
+            4,
+            "/".into(),
+            false,
+            "https://u.urspace.online".into(),
+        );
+        save_managed_config_at(&path, "demo", &config).unwrap();
+        save_managed_config_at(&path, "demo", &config).unwrap();
+        assert_eq!(load_managed_config_at(&path).unwrap(), config);
+
+        let mut changed = config;
+        changed.entry_path = "/different".into();
+        assert!(save_managed_config_at(&path, "demo", &changed).is_err());
+        assert_ne!(load_managed_config_at(&path).unwrap(), changed);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[tokio::test]
