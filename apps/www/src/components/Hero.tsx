@@ -33,9 +33,9 @@ export function Hero() {
       <div className="relative mx-auto flex min-h-[calc(100svh-3.5rem)] max-w-6xl flex-col justify-center px-5 py-16 sm:px-8 sm:py-20">
         <motion.p
           {...enter(0)}
-          className="mb-5 font-[family-name:var(--font-mono)] text-[11px] uppercase tracking-[0.22em] text-[#1f6f5f]"
+          className="mb-5 font-[family-name:var(--font-mono)] text-[11px] uppercase tracking-[0.22em] text-[#5a6570]"
         >
-          Private local sharing
+          A private space between peers.
         </motion.p>
 
         <motion.h1

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 72" fill="none" role="img" aria-label="urspace">
+  <path d="M8 60V18l13.5-6.5v6.5H27v34.5L8 60Z" fill="#0C0E10"/>
+  <path d="M27 52.5V26l18 6.5V58L27 52.5Z" fill="#6B7076"/>
+  <text
+    x="58"
+    y="50"
+    fill="#0C0E10"
+    font-family="Space Grotesk, Arial Black, Helvetica Neue, sans-serif"
+    font-size="44"
+    font-weight="700"
+    letter-spacing="-0.045em"
+  >urspace</text>
+</svg>

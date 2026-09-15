@@ -1,5 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
-  <rect width="32" height="32" rx="6" fill="#0C0E10"/>
-  <path d="M8 22V10h3.2l4.3 7.4L19.8 10H23v12h-2.6v-7.1L16.1 22h-1.7l-4.3-7.1V22H8z" fill="#E8ECEF"/>
-  <circle cx="24.5" cy="8.5" r="1.6" fill="#2A8F78"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none" role="img" aria-label="urspace">
+  <!-- Geometric bold lowercase u -->
+  <path
+    d="M7 6.5h5.2v12.2c0 2.35 1.55 3.7 3.8 3.7s3.8-1.35 3.8-3.7V6.5H25v12.4c0 5.15-3.55 8.35-9 8.35s-9-3.2-9-8.35V6.5Z"
+    fill="#0C0E10"
+  />
 </svg>

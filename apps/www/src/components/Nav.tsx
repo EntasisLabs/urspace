@@ -1,3 +1,5 @@
+import { BrandMark } from './BrandMark'
+
 const links = [
   { href: '#how', label: 'How' },
   { href: '#modes', label: 'Modes' },
@@ -17,20 +19,7 @@ export function Nav() {
           href="#top"
           className="flex items-center gap-2.5 font-[family-name:var(--font-sans)] text-[15px] font-semibold tracking-tight text-[#0c0e10]"
         >
-          <span
-            className="inline-flex h-6 w-6 items-center justify-center bg-[#0c0e10]"
-            aria-hidden
-          >
-            <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none">
-              <path
-                d="M2.5 11.5 8 3.5l5.5 8"
-                stroke="#f4f6f7"
-                strokeWidth="1.6"
-                strokeLinejoin="round"
-              />
-              <circle cx="12.5" cy="4" r="1.3" fill="#2a8f78" />
-            </svg>
-          </span>
+          <BrandMark className="h-6 w-6 shrink-0" />
           urspace
         </a>
         <nav className="flex items-center gap-0.5 sm:gap-2" aria-label="Primary">
