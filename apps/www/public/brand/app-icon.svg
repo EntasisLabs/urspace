@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" role="img" aria-label="urspace app icon">
+  <rect width="512" height="512" rx="112" fill="#0F1827"/>
+  <g transform="translate(92 64) scale(5.1)">
+    <path d="M6.19 14.55 35.11 1.52h.25v14.02l-7.76.05v35.15H6.19V14.55Z" fill="#FFFFFF"/>
+    <path d="M36.12 24.25 57.81 15.38v47.1L36.12 54.44V24.25Z" fill="#9AA0A8"/>
+  </g>
+</svg>

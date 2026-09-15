@@ -7,3 +7,5 @@
 /deploy/cloudflare-worker/.wrangler/
 /deploy/cloudflare-worker/.wrangler-dist/
 /apps/bootstrap/public/.urspace/wasm/
+/apps/www/node_modules/
+/apps/www/dist/
