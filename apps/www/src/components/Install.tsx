@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { BrandWordmark } from './BrandMark'
 
 const installCmd = `curl --proto '=https' --tlsv1.2 -fsSL \\
   https://github.com/EntasisLabs/urspace/releases/latest/download/install-urspace.sh \\
@@ -13,88 +14,105 @@ export function Install() {
     try {
       await navigator.clipboard.writeText(text.replace(/\\\n\s*/g, ''))
       setCopied(key)
-      window.setTimeout(() => setCopied(null), 1800)
+      window.setTimeout(() => setCopied(null), 1600)
     } catch {
       setCopied(null)
     }
   }
 
   return (
-    <section id="install" className="border-t border-[var(--line)] bg-[var(--bg-elevated)]">
-      <div className="mx-auto max-w-6xl px-5 py-20 sm:px-8 sm:py-28">
-        <p className="font-[family-name:var(--font-mono)] text-[11px] uppercase tracking-[0.2em] text-[var(--muted)]">
-          / install
-        </p>
-        <h2 className="mt-4 max-w-xl text-3xl font-semibold tracking-tight text-[var(--ink)] sm:text-4xl">
-          Install once. Share in one command.
-        </h2>
-        <p className="mt-4 max-w-2xl text-base leading-relaxed text-[var(--muted)] sm:text-lg">
-          Prebuilt releases for macOS, Linux, and Windows. The installer lands in{' '}
-          <code className="font-[family-name:var(--font-mono)] text-[0.92em] text-[var(--ink)]">
-            ~/.local/bin
-          </code>{' '}
-          and verifies the download.
-        </p>
+    <section id="install" className="bg-[var(--dark)] text-[var(--dark-text)]">
+      <div className="wrap py-20 sm:py-28">
+        <div className="grid gap-12 lg:grid-cols-12 lg:gap-10">
+          <div className="lg:col-span-5">
+            <BrandWordmark onDark className="h-8" />
+            <h2 className="display mt-8 text-[clamp(1.9rem,3.6vw,2.75rem)] font-semibold leading-[1.08] text-white">
+              Install once.
+              <br />
+              Share in one command.
+            </h2>
+            <p className="mt-5 max-w-sm text-[15.5px] leading-relaxed text-[var(--dark-muted)]">
+              Prebuilt binaries for macOS, Linux, and Windows. The installer
+              verifies the download and places{' '}
+              <code className="font-[family-name:var(--font-mono)] text-[0.92em] text-[var(--dark-text)]">
+                urspace
+              </code>{' '}
+              in{' '}
+              <code className="font-[family-name:var(--font-mono)] text-[0.92em] text-[var(--dark-text)]">
+                ~/.local/bin
+              </code>
+              .
+            </p>
+            <p className="mt-6 text-[13px] leading-relaxed text-[var(--dark-faint)]">
+              Early preview. Chrome and Chromium-based browsers are the main
+              guest path today. Windows builds ship as a zip on{' '}
+              <a
+                href="https://github.com/EntasisLabs/urspace/releases"
+                target="_blank"
+                rel="noreferrer"
+                className="text-[var(--dark-muted)] underline decoration-[var(--dark-line)] underline-offset-4 transition-colors hover:text-white hover:decoration-white"
+              >
+                GitHub Releases
+              </a>
+              .
+            </p>
+          </div>
 
-        <div className="mt-12 space-y-6">
-          <CommandBlock
-            label="macOS / Linux"
-            command={installCmd}
-            copied={copied === 'install'}
-            onCopy={() => copy(installCmd, 'install')}
-          />
-          <CommandBlock
-            label="then share"
-            command={serveCmd}
-            copied={copied === 'serve'}
-            onCopy={() => copy(serveCmd, 'serve')}
-          />
+          <div className="space-y-4 lg:col-span-7">
+            <CommandBlock
+              step="1"
+              label="Install"
+              command={installCmd}
+              copied={copied === 'install'}
+              onCopy={() => copy(installCmd, 'install')}
+            />
+            <CommandBlock
+              step="2"
+              label="Share"
+              command={serveCmd}
+              copied={copied === 'serve'}
+              onCopy={() => copy(serveCmd, 'serve')}
+            />
+          </div>
         </div>
-
-        <p className="mt-8 text-sm leading-relaxed text-[var(--muted)]">
-          Windows: download the zip from{' '}
-          <a
-            href="https://github.com/EntasisLabs/urspace/releases"
-            target="_blank"
-            rel="noreferrer"
-            className="underline decoration-[var(--line-strong)] underline-offset-4 transition-colors hover:text-[var(--ink)] hover:decoration-[var(--ink)]"
-          >
-            GitHub Releases
-          </a>
-          . Early preview—Chrome and Chromium-based browsers are the main path today.
-        </p>
       </div>
     </section>
   )
 }
 
 function CommandBlock({
+  step,
   label,
   command,
   copied,
   onCopy,
 }: {
+  step: string
   label: string
   command: string
   copied: boolean
   onCopy: () => void
 }) {
   return (
-    <div className="overflow-hidden border border-[var(--line)] bg-[var(--dark)]">
-      <div className="flex items-center justify-between border-b border-[var(--dark-line)] px-4 py-2.5">
-        <span className="font-[family-name:var(--font-mono)] text-[11px] uppercase tracking-[0.16em] text-[var(--dark-muted)]">
+    <div className="overflow-hidden rounded-[10px] border border-[var(--dark-line)] bg-[var(--dark-2)]">
+      <div className="flex h-10 items-center justify-between border-b border-[var(--dark-line)] px-4">
+        <span className="flex items-center gap-3 font-[family-name:var(--font-mono)] text-[11px] tracking-[0.04em] text-[var(--dark-muted)]">
+          <span className="num text-[var(--dark-faint)]">{step}</span>
           {label}
         </span>
         <button
           type="button"
           onClick={onCopy}
-          className="font-[family-name:var(--font-mono)] text-[11px] uppercase tracking-[0.14em] text-[var(--signal)] transition-opacity hover:opacity-80"
+          aria-live="polite"
+          className="rounded px-2 py-1 font-[family-name:var(--font-mono)] text-[11px] tracking-[0.04em] text-[var(--dark-muted)] transition-colors hover:bg-[var(--dark-3)] hover:text-white"
         >
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
-      <pre className="overflow-x-auto px-4 py-4 font-[family-name:var(--font-mono)] text-[13px] leading-relaxed text-[#d7dde2]">
-        <code>{command}</code>
+      <pre className="term overflow-x-auto px-4 py-4 sm:px-5">
+        <code>
+          <span className="p">$</span> {command}
+        </code>
       </pre>
     </div>
   )

@@ -1,9 +1,9 @@
-import { BrandMark } from './BrandMark'
+import { BrandWordmark } from './BrandMark'
 
 const links = [
-  { href: '#how', label: 'How' },
+  { href: '#why', label: 'Why' },
+  { href: '#control', label: 'Control' },
   { href: '#modes', label: 'Modes' },
-  { href: '#install', label: 'Install' },
   {
     href: 'https://github.com/EntasisLabs/urspace',
     label: 'GitHub',
@@ -13,28 +13,29 @@ const links = [
 
 export function Nav() {
   return (
-    <header className="sticky top-0 z-40 border-b border-[var(--line)]/70 bg-[color-mix(in_srgb,var(--bg)_82%,transparent)] backdrop-blur-md">
-      <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-4 px-5 sm:px-8">
-        <a
-          href="#top"
-          className="flex items-center gap-2.5 font-[family-name:var(--font-sans)] text-[15px] font-semibold tracking-tight text-[#0c0e10]"
-        >
-          <BrandMark className="h-6 w-6 shrink-0" />
-          urspace
+    <header className="sticky top-0 z-40 border-b border-[var(--line)] bg-[color-mix(in_srgb,var(--paper)_86%,transparent)] backdrop-blur-md">
+      <div className="wrap flex h-16 items-center justify-between gap-6">
+        <a href="#top" className="flex items-center" aria-label="urspace home">
+          <BrandWordmark className="h-7 sm:h-8" />
         </a>
-        <nav className="flex items-center gap-0.5 sm:gap-2" aria-label="Primary">
+
+        <nav className="flex items-center gap-1 sm:gap-2" aria-label="Primary">
           {links.map((link) => (
             <a
               key={link.label}
               href={link.href}
-              {...(link.external
-                ? { target: '_blank', rel: 'noreferrer' }
-                : {})}
-              className="px-2 py-1.5 font-[family-name:var(--font-mono)] text-[10px] uppercase tracking-[0.14em] text-[#5a6570] transition-colors hover:text-[#0c0e10] sm:px-2.5 sm:text-[11px]"
+              {...(link.external ? { target: '_blank', rel: 'noreferrer' } : {})}
+              className="hidden px-2.5 py-1.5 text-[13.5px] font-medium text-[var(--ink-2)] transition-colors hover:text-[var(--ink)] sm:block"
             >
               {link.label}
             </a>
           ))}
+          <a
+            href="#install"
+            className="ml-1 inline-flex h-9 items-center rounded-md bg-[var(--ink)] px-3.5 text-[13px] font-medium text-white transition-colors hover:bg-[var(--dark-3)] sm:ml-3"
+          >
+            Install
+          </a>
         </nav>
       </div>
     </header>

@@ -1,64 +1,61 @@
-import { motion, useReducedMotion } from 'framer-motion'
-
 const steps = [
   {
     n: '01',
-    title: 'Point at loopback',
-    body: 'Run urspace against an app already listening on localhost. Only 127.0.0.1, ::1, or localhost are accepted.',
+    who: 'Host',
+    title: 'Run one command.',
+    body: 'urspace confirms the local port is listening, mints a site identity and a random capability, and prints the invitation. Nothing about your app is uploaded.',
+    code: 'urspace serve localhost:8787',
   },
   {
     n: '02',
-    title: 'Send an invitation',
-    body: 'Urspace prints a hard-to-guess link. Treat it like a temporary password—set TTL and session limits.',
+    who: 'Guest',
+    title: 'Open the link.',
+    body: 'A small, generic bootstrap page loads once. The capability lives in the URL fragment, which browsers never send to a server. From there the page connects straight to your host.',
+    code: 'https://u.urspace.online/#s1=…',
   },
   {
     n: '03',
-    title: 'Guest opens it',
-    body: 'They use Chrome. No Urspace account, CLI, or network access. After admission, refresh and reconnect keep working until you kick them or stop the host.',
+    who: 'Both',
+    title: 'Talk directly.',
+    body: 'Requests travel end-to-end encrypted between host and browser over Iroh. Your app answers on loopback as if the guest were sitting at your machine.',
+    code: 'browser ⇄ host · encrypted',
   },
 ]
 
 export function HowItWorks() {
-  const reduce = useReducedMotion()
-
   return (
-    <section id="how" className="border-t border-[var(--line)] bg-[var(--bg-elevated)]">
-      <div className="mx-auto max-w-6xl px-5 py-20 sm:px-8 sm:py-28">
-        <p className="font-[family-name:var(--font-mono)] text-[11px] uppercase tracking-[0.2em] text-[var(--muted)]">
-          / how it works
-        </p>
-        <h2 className="mt-4 max-w-2xl text-3xl font-semibold tracking-tight text-[var(--ink)] sm:text-4xl">
-          Invitation in. App stays home.
-        </h2>
-        <p className="mt-4 max-w-2xl text-base leading-relaxed text-[var(--muted)] sm:text-lg">
-          You share access to one local origin—not a public server. Cloudflare
-          may help the browser start the session; it does not proxy your app.
-        </p>
+    <section id="how" className="border-t border-[var(--line)] bg-[var(--paper-2)]">
+      <div className="wrap py-20 sm:py-28">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="eyebrow">How it works</p>
+            <h2 className="display mt-4 text-[clamp(1.9rem,3.6vw,2.75rem)] font-semibold leading-[1.08] text-[var(--ink)]">
+              Three moves. No middle.
+            </h2>
+          </div>
+          <p className="max-w-sm text-[14.5px] leading-relaxed text-[var(--ink-2)]">
+            There is no account to create, no dashboard to visit, and no relay
+            that reads your traffic.
+          </p>
+        </div>
 
-        <ol className="mt-14 grid gap-10 md:grid-cols-3 md:gap-8">
-          {steps.map((step, index) => (
-            <motion.li
-              key={step.n}
-              initial={reduce ? false : { opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, margin: '-10%' }}
-              transition={{
-                duration: 0.55,
-                delay: index * 0.08,
-                ease: [0.22, 1, 0.36, 1],
-              }}
-              className="relative"
-            >
-              <span className="font-[family-name:var(--font-mono)] text-[12px] tracking-[0.16em] text-[var(--accent)]">
-                {step.n}
-              </span>
-              <h3 className="mt-3 text-xl font-semibold tracking-tight text-[var(--ink)]">
-                {step.title}
+        <ol className="mt-12 grid gap-px overflow-hidden rounded-[10px] border border-[var(--line)] bg-[var(--line)] md:grid-cols-3">
+          {steps.map((s) => (
+            <li key={s.n} className="flex flex-col bg-[var(--paper)] p-6 sm:p-7">
+              <div className="flex items-baseline justify-between">
+                <span className="num text-[11px] tracking-[0.12em] text-[var(--ink-3)]">{s.n}</span>
+                <span className="eyebrow">{s.who}</span>
+              </div>
+              <h3 className="display mt-6 text-[20px] font-semibold leading-tight text-[var(--ink)]">
+                {s.title}
               </h3>
-              <p className="mt-3 text-[15px] leading-relaxed text-[var(--muted)]">
-                {step.body}
+              <p className="mt-3 flex-1 text-[14.5px] leading-relaxed text-[var(--ink-2)]">
+                {s.body}
               </p>
-            </motion.li>
+              <code className="mt-6 block truncate border-t border-[var(--line)] pt-4 font-[family-name:var(--font-mono)] text-[12.5px] text-[var(--ink)]">
+                {s.code}
+              </code>
+            </li>
           ))}
         </ol>
       </div>

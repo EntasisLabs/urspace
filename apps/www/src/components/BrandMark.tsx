@@ -62,9 +62,11 @@ export function BrandWordmark({
 }) {
   return (
     <img
-      src={onDark ? '/brand/wordmark-on-dark.png' : '/brand/wordmark.png'}
+      src={onDark ? '/brand/wordmark-on-dark-sm.png' : '/brand/wordmark-sm.png'}
       alt={title}
-      className={`object-contain object-left ${className}`}
+      className={`w-auto max-w-none object-contain object-left ${className}`}
+      width={720}
+      height={240}
       decoding="async"
     />
   )
