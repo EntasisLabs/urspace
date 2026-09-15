@@ -5,7 +5,6 @@ const rows: [string, string, string, string, string][] = [
   ['Host exposure', 'Loopback only, outbound', 'Whole device on the mesh', 'Public URL', 'Public port'],
   ['Who can reach it', 'Holders of a rotating invitation', 'Anyone on the network', 'Anyone with the URL', 'Anyone on the internet'],
   ['App traffic passes through', 'Nobody', 'Coordinator-relayed at times', 'The provider', 'Nobody'],
-  ['When it ends', 'Ctrl+C. Gone.', 'Device stays enrolled', 'URL may persist', 'Rule stays open'],
 ]
 
 export function Position() {
@@ -19,8 +18,8 @@ export function Position() {
               Not a network. Not a tunnel. A door with one key.
             </h2>
             <p className="mt-5 max-w-sm text-[15.5px] leading-relaxed text-[var(--ink-2)]">
-              Mesh VPNs join devices. Tunnel services publish URLs. urspace admits
-              a browser to one app and forgets it when you are done.
+              Mesh VPNs join devices. Tunnel services publish URLs. urspace
+              admits a browser to one app.
             </p>
           </div>
 

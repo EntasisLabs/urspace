@@ -1,12 +1,5 @@
 import { Terminal } from './Terminal'
 
-const facts = [
-  ['Guest needs', 'A browser. No account, no client.'],
-  ['Host opens', 'Nothing. No inbound port, no DNS.'],
-  ['Traffic goes', 'Host to browser, end-to-end encrypted.'],
-  ['When you stop', 'The site is gone. Nothing lingers.'],
-]
-
 export function Hero() {
   return (
     <section id="top" className="relative overflow-hidden">
@@ -24,9 +17,9 @@ export function Hero() {
             </h1>
 
             <p className="mt-7 max-w-[34rem] text-[17px] leading-[1.6] text-[var(--ink-2)] sm:text-lg">
-              urspace gives a local web app a private, encrypted path to one
-              invited browser. No account for them. No open ports for you. Stop
-              the process and the site is gone.
+              urspace gives the web app running on your machine a private,
+              encrypted path to one invited browser. One command on your side.
+              One link on theirs.
             </p>
 
             <div className="mt-9 flex flex-wrap items-center gap-3">
@@ -80,19 +73,6 @@ export function Hero() {
           </div>
         </div>
 
-        <dl className="mt-16 grid grid-cols-2 border-t border-[var(--line)] lg:mt-24 lg:grid-cols-4">
-          {facts.map(([term, detail], i) => (
-            <div
-              key={term}
-              className={`border-b border-[var(--line)] py-5 pr-5 lg:border-b-0 lg:py-6 ${
-                i % 2 === 1 ? 'border-l pl-5 lg:border-l' : ''
-              } ${i >= 2 ? 'lg:border-l lg:pl-5' : ''}`}
-            >
-              <dt className="eyebrow">{term}</dt>
-              <dd className="mt-2 text-[15px] leading-snug text-[var(--ink)]">{detail}</dd>
-            </div>
-          ))}
-        </dl>
       </div>
     </section>
   )

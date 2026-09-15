@@ -1,23 +1,18 @@
-const principles = [
+const boundaries = [
   {
     n: '01',
-    title: 'Loopback only.',
-    body: 'The host forwards to 127.0.0.1, ::1, or localhost and nothing else. It checks the port is listening before it mints an identity. It cannot be turned into an open proxy for your LAN or the internet.',
+    title: 'Loopback, and only loopback.',
+    body: 'The host forwards to 127.0.0.1, ::1, or localhost. It refuses credentials, paths, and any other address, so it cannot be pointed at your LAN or the internet.',
   },
   {
     n: '02',
     title: 'The invitation is the key.',
-    body: 'A fresh random capability every time you share. It expires, it caps sessions, and you can rotate it without restarting. Whoever holds it may knock. Nobody else can.',
+    body: 'Fresh and random on every share. It expires on a timer you set, admits a fixed number of browsers, and can be rotated at any moment. Whoever holds it may knock.',
   },
   {
     n: '03',
-    title: 'Nothing sees your app but the browser.',
-    body: 'The bootstrap page is generic and immutable. Once loaded, requests travel encrypted between host and browser over Iroh. The bootstrap origin never carries application traffic.',
-  },
-  {
-    n: '04',
-    title: 'Stop, and it is gone.',
-    body: 'A foreground share ends with Ctrl+C. A named service remembers who you admitted, keeps kicked browsers kicked, and never writes an invitation into a log.',
+    title: 'Secrets stay off the disk.',
+    body: 'Invitations, capabilities, and browser keys are never written to a log or a journal. What persists is hashes, limits, and revocation state.',
   },
 ]
 
@@ -27,24 +22,29 @@ export function Principles() {
       <div className="wrap py-20 sm:py-28">
         <div className="grid gap-10 lg:grid-cols-12">
           <div className="lg:col-span-4">
-            <p className="eyebrow">Why it holds</p>
+            <p className="eyebrow">Boundaries</p>
             <h2 className="display mt-4 text-[clamp(1.9rem,3.6vw,2.75rem)] font-semibold leading-[1.08] text-[var(--ink)]">
-              Built like infrastructure. Used like a link.
+              Narrow on purpose.
             </h2>
             <p className="mt-5 max-w-sm text-[15.5px] leading-relaxed text-[var(--ink-2)]">
-              Every decision starts from the same question: what does the host
-              expose, and who can reach it? The answers are narrow on purpose.
+              Every decision starts from one question: what does the host
+              expose, and to whom?
             </p>
           </div>
 
-          <ol className="grid gap-px overflow-hidden rounded-[10px] border border-[var(--line)] bg-[var(--line)] sm:grid-cols-2 lg:col-span-8">
-            {principles.map((p) => (
-              <li key={p.n} className="bg-[var(--paper)] p-6 sm:p-7">
-                <span className="num text-[11px] tracking-[0.12em] text-[var(--ink-3)]">{p.n}</span>
-                <h3 className="display mt-4 text-[19px] font-semibold leading-tight text-[var(--ink)]">
+          <ol className="grid gap-px overflow-hidden rounded-[10px] border border-[var(--line)] bg-[var(--line)] lg:col-span-8">
+            {boundaries.map((p) => (
+              <li
+                key={p.n}
+                className="grid gap-3 bg-[var(--paper)] p-6 sm:grid-cols-[3rem_14rem_1fr] sm:gap-6 sm:p-7"
+              >
+                <span className="num text-[11px] tracking-[0.12em] text-[var(--ink-3)] sm:pt-1">
+                  {p.n}
+                </span>
+                <h3 className="display text-[19px] font-semibold leading-tight text-[var(--ink)]">
                   {p.title}
                 </h3>
-                <p className="mt-3 text-[14.5px] leading-relaxed text-[var(--ink-2)]">{p.body}</p>
+                <p className="text-[14.5px] leading-relaxed text-[var(--ink-2)]">{p.body}</p>
               </li>
             ))}
           </ol>

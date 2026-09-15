@@ -14,9 +14,9 @@ export default function App() {
       <Nav />
       <main>
         <Hero />
-        <Principles />
-        <Control />
         <HowItWorks />
+        <Control />
+        <Principles />
         <Modes />
         <Position />
         <Install />

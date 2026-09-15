@@ -19,9 +19,9 @@ export function Control() {
               You stay in the room.
             </h2>
             <p className="mt-5 max-w-md text-[15.5px] leading-relaxed text-[var(--ink-2)]">
-              Sharing is not a fire-and-forget upload. The terminal that opened
-              the door stays open, and it answers to you. See who is inside.
-              Remove them. Hand out a new key. None of it restarts the site.
+              The terminal that opened the door stays open, and it answers to
+              you. See who is inside. Remove them. Hand out a new key. None of
+              it restarts the site.
             </p>
 
             <dl className="mt-9 divide-y divide-[var(--line)] border-y border-[var(--line)]">

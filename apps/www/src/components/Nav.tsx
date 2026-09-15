@@ -1,7 +1,7 @@
 import { BrandWordmark } from './BrandMark'
 
 const links = [
-  { href: '#why', label: 'Why' },
+  { href: '#how', label: 'How' },
   { href: '#control', label: 'Control' },
   { href: '#modes', label: 'Modes' },
   {

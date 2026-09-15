@@ -43,6 +43,9 @@ export function Install() {
               </code>
               .
             </p>
+            <p className="mt-4 max-w-sm text-[15.5px] leading-relaxed text-[var(--dark-muted)]">
+              When you are done, press Ctrl+C. The site is gone.
+            </p>
             <p className="mt-6 text-[13px] leading-relaxed text-[var(--dark-faint)]">
               Early preview. Chrome and Chromium-based browsers are the main
               guest path today. Windows builds ship as a zip on{' '}
