@@ -1,11 +1,7 @@
 /**
- * Urspace brand mark — Brand Identity Variation 01 (Standard / Refined).
- * Paths traced from the sheet icon: black slab with top-right tab + gray plane.
+ * Urspace brand mark.
+ * Prefer the official PNG (`/brand/mark.png`) for UI; SVG paths are a traced fallback.
  */
-const BLACK =
-  'M5.27 12.75 28.88 1.81h4.51v11.42l-6.91.19v45.31H5.27V12.75Z'
-const GRAY = 'M34.64 21.97 58.73 12.75v49.44L34.64 55.85V21.97Z'
-
 export function BrandMark({
   className = 'h-6 w-6',
   title = 'urspace',
@@ -14,18 +10,14 @@ export function BrandMark({
   title?: string
 }) {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 64 64"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-      role="img"
-      aria-label={title}
-    >
-      <title>{title}</title>
-      <path d={BLACK} fill="#000000" />
-      <path d={GRAY} fill="#5A5A5A" />
-    </svg>
+    <img
+      src="/brand/mark.png"
+      alt={title}
+      className={`object-contain ${className}`}
+      width={64}
+      height={64}
+      decoding="async"
+    />
   )
 }
 
@@ -36,6 +28,7 @@ export function BrandMarkOnDark({
   className?: string
   title?: string
 }) {
+  // Knockout version for dark surfaces — use official app-icon crop via SVG fallback colors
   return (
     <svg
       className={className}
@@ -46,8 +39,33 @@ export function BrandMarkOnDark({
       aria-label={title}
     >
       <title>{title}</title>
-      <path d={BLACK} fill="#FFFFFF" />
-      <path d={GRAY} fill="#B3B3B3" />
+      <path
+        d="M6.19 14.55 35.11 1.52h.25v14.02l-7.76.05v35.15H6.19V14.55Z"
+        fill="#FFFFFF"
+      />
+      <path
+        d="M36.12 24.25 57.81 15.38v47.1L36.12 54.44V24.25Z"
+        fill="#9AA0A8"
+      />
     </svg>
+  )
+}
+
+export function BrandWordmark({
+  className = 'h-8',
+  title = 'urspace',
+  onDark = false,
+}: {
+  className?: string
+  title?: string
+  onDark?: boolean
+}) {
+  return (
+    <img
+      src={onDark ? '/brand/wordmark-on-dark.png' : '/brand/wordmark.png'}
+      alt={title}
+      className={`object-contain object-left ${className}`}
+      decoding="async"
+    />
   )
 }
