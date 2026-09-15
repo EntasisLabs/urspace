@@ -1,10 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 72" fill="none" role="img" aria-label="urspace">
-  <path d="M8 60V18l13.5-6.5v6.5H27v34.5L8 60Z" fill="#0C0E10"/>
-  <path d="M27 52.5V26l18 6.5V58L27 52.5Z" fill="#6B7076"/>
+  <svg x="0" y="2" width="64" height="64" viewBox="0 0 64 64">
+    <path
+      d="M5.27 12.75 28.88 1.81h4.51v11.42l-6.91.19v45.31H5.27V12.75Z"
+      fill="#000000"
+    />
+    <path
+      d="M34.64 21.97 58.73 12.75v49.44L34.64 55.85V21.97Z"
+      fill="#5A5A5A"
+    />
+  </svg>
   <text
-    x="58"
+    x="72"
     y="50"
-    fill="#0C0E10"
+    fill="#000000"
     font-family="Space Grotesk, Arial Black, Helvetica Neue, sans-serif"
     font-size="44"
     font-weight="700"

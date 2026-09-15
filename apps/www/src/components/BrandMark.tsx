@@ -1,7 +1,11 @@
 /**
- * Urspace brand mark — two perspective slabs forming a private space.
- * Variation 01 (Standard / Refined).
+ * Urspace brand mark — Brand Identity Variation 01 (Standard / Refined).
+ * Paths traced from the sheet icon: black slab with top-right tab + gray plane.
  */
+const BLACK =
+  'M5.27 12.75 28.88 1.81h4.51v11.42l-6.91.19v45.31H5.27V12.75Z'
+const GRAY = 'M34.64 21.97 58.73 12.75v49.44L34.64 55.85V21.97Z'
+
 export function BrandMark({
   className = 'h-6 w-6',
   title = 'urspace',
@@ -19,8 +23,8 @@ export function BrandMark({
       aria-label={title}
     >
       <title>{title}</title>
-      <path d="M14 54V16l12-6v6h5v32L14 54Z" fill="#0C0E10" />
-      <path d="M31 48V22l16 6v24L31 48Z" fill="#6B7076" />
+      <path d={BLACK} fill="#000000" />
+      <path d={GRAY} fill="#5A5A5A" />
     </svg>
   )
 }
@@ -42,8 +46,8 @@ export function BrandMarkOnDark({
       aria-label={title}
     >
       <title>{title}</title>
-      <path d="M14 54V16l12-6v6h5v32L14 54Z" fill="#F4F6F7" />
-      <path d="M31 48V22l16 6v24L31 48Z" fill="#9AA0A6" />
+      <path d={BLACK} fill="#FFFFFF" />
+      <path d={GRAY} fill="#B3B3B3" />
     </svg>
   )
 }

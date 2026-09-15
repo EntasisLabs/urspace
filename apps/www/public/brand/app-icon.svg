@@ -1,5 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" role="img" aria-label="urspace app icon">
-  <rect width="512" height="512" rx="112" fill="#0C0E10"/>
-  <path d="M148 392V168l72-36v36h30v192L148 392Z" fill="#F4F6F7"/>
-  <path d="M250 360V204l96 36v152L250 360Z" fill="#9AA0A6"/>
+  <rect width="512" height="512" rx="112" fill="#000000"/>
+  <g transform="translate(88 56) scale(5.25)">
+    <path
+      d="M5.27 12.75 28.88 1.81h4.51v11.42l-6.91.19v45.31H5.27V12.75Z"
+      fill="#FFFFFF"
+    />
+    <path
+      d="M34.64 21.97 58.73 12.75v49.44L34.64 55.85V21.97Z"
+      fill="#B3B3B3"
+    />
+  </g>
 </svg>

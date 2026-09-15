@@ -1,4 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="urspace mark">
-  <path d="M14 54V16l12-6v6h5v32L14 54Z" fill="currentColor"/>
-  <path d="M31 48V22l16 6v24L31 48Z" fill="currentColor" opacity="0.42"/>
+  <path
+    d="M5.27 12.75 28.88 1.81h4.51v11.42l-6.91.19v45.31H5.27V12.75Z"
+    fill="currentColor"
+  />
+  <path
+    d="M34.64 21.97 58.73 12.75v49.44L34.64 55.85V21.97Z"
+    fill="currentColor"
+    opacity="0.36"
+  />
 </svg>
