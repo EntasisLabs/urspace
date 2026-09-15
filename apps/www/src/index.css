@@ -39,9 +39,7 @@ html {
 body {
   margin: 0;
   min-width: 320px;
-  background:
-    radial-gradient(120% 80% at 50% -10%, rgba(42, 143, 120, 0.08), transparent 55%),
-    linear-gradient(180deg, #eceff2 0%, var(--bg) 28%, #dde2e6 100%);
+  background: var(--bg);
 }
 
 #root {
@@ -61,51 +59,7 @@ button {
   font: inherit;
 }
 
-.grid-mesh {
-  background-image:
-    linear-gradient(to right, rgba(12, 14, 16, 0.045) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(12, 14, 16, 0.045) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black 20%, transparent 75%);
-}
-
-.packet {
-  offset-path: path('M 80 220 C 220 80, 420 360, 560 180');
-  offset-rotate: 0deg;
-  animation: packet-travel 4.8s linear infinite;
-}
-
-.packet:nth-child(2) {
-  animation-delay: -1.6s;
-}
-
-.packet:nth-child(3) {
-  animation-delay: -3.2s;
-}
-
-@keyframes packet-travel {
-  0% {
-    offset-distance: 0%;
-    opacity: 0;
-  }
-  8% {
-    opacity: 1;
-  }
-  92% {
-    opacity: 1;
-  }
-  100% {
-    offset-distance: 100%;
-    opacity: 0;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .packet {
-    animation: none;
-    opacity: 0.7;
-  }
-
   html {
     scroll-behavior: auto;
   }
