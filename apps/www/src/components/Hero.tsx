@@ -53,10 +53,7 @@ export function Hero() {
           invitation in a browser—no account, VPN, or open ports.
         </motion.p>
 
-        <motion.div
-          {...enter(0.2)}
-          className="mt-10 flex flex-wrap items-center gap-3"
-        >
+        <div className="mt-10 flex flex-wrap items-center gap-3">
           <a
             href="#install"
             className="inline-flex items-center bg-[#0c0e10] px-5 py-3.5 font-[family-name:var(--font-mono)] text-[13px] font-medium uppercase tracking-[0.14em] text-white transition-[transform,background-color] duration-200 hover:bg-[#143f37] active:scale-[0.98]"
@@ -71,7 +68,7 @@ export function Hero() {
           >
             GitHub
           </a>
-        </motion.div>
+        </div>
       </div>
     </section>
   )
