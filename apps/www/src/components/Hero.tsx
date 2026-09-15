@@ -1,53 +1,65 @@
-import { motion } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
 import { ConnectionField } from './ConnectionField'
 
 export function Hero() {
+  const reduce = useReducedMotion()
+  const enter = (delay = 0) =>
+    reduce
+      ? undefined
+      : {
+          initial: { opacity: 0.01, y: 16 },
+          animate: { opacity: 1, y: 0 },
+          transition: {
+            duration: 0.65,
+            delay,
+            ease: [0.22, 1, 0.36, 1] as const,
+          },
+        }
+
   return (
     <section
       id="top"
       className="relative isolate min-h-[calc(100svh-3.5rem)] overflow-hidden"
     >
       <div className="pointer-events-none absolute inset-0 grid-mesh" aria-hidden />
-      <ConnectionField />
+      <div className="pointer-events-none absolute inset-x-0 top-[8%] bottom-[18%] opacity-[0.55] sm:opacity-80 lg:inset-y-0 lg:left-[38%] lg:right-0 lg:opacity-100">
+        <ConnectionField />
+      </div>
+      <div
+        className="pointer-events-none absolute inset-0 bg-gradient-to-b from-[color-mix(in_srgb,var(--bg)_55%,transparent)] via-transparent to-[var(--bg)] lg:bg-gradient-to-r lg:from-[var(--bg)] lg:via-[color-mix(in_srgb,var(--bg)_72%,transparent)] lg:to-transparent"
+        aria-hidden
+      />
 
-      <div className="relative mx-auto flex min-h-[calc(100svh-3.5rem)] max-w-6xl flex-col justify-end px-5 pb-16 pt-20 sm:px-8 sm:pb-20 lg:justify-center lg:pb-24 lg:pt-10">
+      <div className="relative mx-auto flex min-h-[calc(100svh-3.5rem)] max-w-6xl flex-col justify-center px-5 py-16 sm:px-8 sm:py-20">
         <motion.p
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.55, ease: [0.22, 1, 0.36, 1] }}
-          className="mb-5 font-[family-name:var(--font-mono)] text-[11px] uppercase tracking-[0.22em] text-[var(--accent)]"
+          {...enter(0)}
+          className="mb-5 font-[family-name:var(--font-mono)] text-[11px] uppercase tracking-[0.22em] text-[#1f6f5f]"
         >
           Private local sharing
         </motion.p>
 
         <motion.h1
-          initial={{ opacity: 0, y: 18 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.7, delay: 0.06, ease: [0.22, 1, 0.36, 1] }}
-          className="max-w-[11ch] text-[clamp(3.4rem,12vw,7.5rem)] font-semibold leading-[0.9] tracking-[-0.045em] text-[var(--ink)]"
+          {...enter(0.05)}
+          className="max-w-[11ch] text-[clamp(3.6rem,13vw,7.75rem)] font-semibold leading-[0.88] tracking-[-0.05em] text-[#0c0e10]"
         >
           urspace
         </motion.h1>
 
         <motion.p
-          initial={{ opacity: 0, y: 14 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.65, delay: 0.16, ease: [0.22, 1, 0.36, 1] }}
-          className="mt-6 max-w-xl text-lg leading-relaxed text-[var(--muted)] sm:text-xl"
+          {...enter(0.12)}
+          className="mt-6 max-w-md text-lg leading-relaxed text-[#5a6570] sm:max-w-lg sm:text-xl"
         >
           A private encrypted path to the app on your machine. Guests open one
           invitation in a browser—no account, VPN, or open ports.
         </motion.p>
 
         <motion.div
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.6, delay: 0.28, ease: [0.22, 1, 0.36, 1] }}
+          {...enter(0.2)}
           className="mt-10 flex flex-wrap items-center gap-3"
         >
           <a
             href="#install"
-            className="inline-flex items-center bg-[var(--ink)] px-5 py-3 font-[family-name:var(--font-mono)] text-[12px] uppercase tracking-[0.16em] text-[var(--bg-elevated)] transition-[transform,background-color] duration-200 hover:bg-[var(--accent-ink)] active:scale-[0.98]"
+            className="inline-flex items-center bg-[#0c0e10] px-5 py-3.5 font-[family-name:var(--font-mono)] text-[13px] font-medium uppercase tracking-[0.14em] text-white transition-[transform,background-color] duration-200 hover:bg-[#143f37] active:scale-[0.98]"
           >
             Get the CLI
           </a>
@@ -55,7 +67,7 @@ export function Hero() {
             href="https://github.com/EntasisLabs/urspace"
             target="_blank"
             rel="noreferrer"
-            className="inline-flex items-center border border-[var(--ink)]/25 bg-transparent px-5 py-3 font-[family-name:var(--font-mono)] text-[12px] uppercase tracking-[0.16em] text-[var(--ink)] transition-colors duration-200 hover:border-[var(--ink)] hover:bg-[var(--bg-elevated)]"
+            className="inline-flex items-center border border-[#0c0e10]/30 bg-[color-mix(in_srgb,#f4f6f7_70%,transparent)] px-5 py-3.5 font-[family-name:var(--font-mono)] text-[13px] font-medium uppercase tracking-[0.14em] text-[#0c0e10] backdrop-blur-sm transition-colors duration-200 hover:border-[#0c0e10] hover:bg-[#f4f6f7]"
           >
             GitHub
           </a>

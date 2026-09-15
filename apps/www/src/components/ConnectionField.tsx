@@ -1,14 +1,15 @@
 export function ConnectionField() {
   return (
     <div
-      className="pointer-events-none absolute inset-0 flex items-start justify-center pt-6 sm:items-center sm:pt-0"
+      className="pointer-events-none absolute inset-0 flex items-center justify-center"
       aria-hidden
     >
       <svg
-        className="h-[min(72vh,640px)] w-[min(110%,920px)] opacity-90"
+        className="h-full w-full max-h-[640px] max-w-[920px]"
         viewBox="0 0 640 400"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
+        preserveAspectRatio="xMidYMid meet"
       >
         <defs>
           <linearGradient id="pathFade" x1="80" y1="220" x2="560" y2="180" gradientUnits="userSpaceOnUse">
