@@ -17,7 +17,7 @@ const steps = [
     n: '03',
     who: 'Both',
     title: 'Talk directly.',
-    body: 'Requests travel end-to-end encrypted between browser and host over Iroh. Your app answers on loopback as if the guest were sitting at your desk.',
+    body: 'Requests travel end-to-end encrypted between browser and host over Iroh. If no direct path exists, a relay carries ciphertext it cannot read. Your app answers on loopback as if the guest were at your desk.',
     code: 'browser ⇄ host · encrypted',
   },
 ]
@@ -28,12 +28,12 @@ export function HowItWorks() {
       <div className="wrap py-20 sm:py-28">
         <p className="eyebrow">How it works</p>
         <h2 className="display mt-4 text-[clamp(1.9rem,3.6vw,2.75rem)] font-semibold leading-[1.08] text-[var(--ink)]">
-          Three moves. No middle.
+          Three moves. Sealed end to end.
         </h2>
 
         <ol className="mt-12 grid gap-px overflow-hidden rounded-[10px] border border-[var(--line)] bg-[var(--line)] md:grid-cols-3">
           {steps.map((s) => (
-            <li key={s.n} className="flex flex-col bg-[var(--paper)] p-6 sm:p-7">
+            <li key={s.n} className="flex min-w-0 flex-col bg-[var(--paper)] p-6 sm:p-7">
               <div className="flex items-baseline justify-between">
                 <span className="num text-[11px] tracking-[0.12em] text-[var(--ink-3)]">{s.n}</span>
                 <span className="eyebrow">{s.who}</span>

@@ -18,7 +18,7 @@ export function Hero() {
 
             <p className="mt-7 max-w-[34rem] text-[17px] leading-[1.6] text-[var(--ink-2)] sm:text-lg">
               urspace gives the web app running on your machine a private,
-              encrypted path to one invited browser. One command on your side.
+              encrypted path to an invited browser. One command on your side.
               One link on theirs.
             </p>
 
@@ -51,7 +51,7 @@ export function Hero() {
             <Terminal title="~ — urspace" status="sharing">
               <span className="p">$</span> urspace serve localhost:8787 --ttl 10m --max-sessions 1 --short
               {'\n\n'}
-              <span className="k">Urspace is serving app at http://127.0.0.1:8787</span>
+              <span className="k">urspace is serving app at http://127.0.0.1:8787</span>
               {'\n'}
               <span className="m">Only an encrypted link envelope was uploaded; application traffic travels over Iroh.</span>
               {'\n\n'}
