@@ -1,15 +1,15 @@
 const cols = ['', 'urspace', 'Mesh VPN', 'Tunnel service', 'Port forward']
 
 const rows: [string, string, string, string, string][] = [
-  ['Guest setup', 'A browser', 'Install client, join network', 'None', 'None'],
+  ['Guest setup', 'A browser, or the CLI', 'Install client, join network', 'None', 'None'],
   ['Host exposure', 'Loopback only, outbound', 'Whole device on the mesh', 'Public URL', 'Public port'],
   ['Who can reach it', 'Holders of a rotating invitation', 'Anyone on the network', 'Anyone with the URL', 'Anyone on the internet'],
-  ['App traffic passes through', 'Nobody', 'Coordinator-relayed at times', 'The provider', 'Nobody'],
+  ['Who can read app traffic', 'Only host and guest', 'Only the peers', 'The provider, at its edge', 'Anyone on the path, unless the app adds TLS'],
 ]
 
 export function Position() {
   return (
-    <section id="compare" className="border-t border-[var(--line)] bg-[var(--paper-2)]">
+    <section id="compare" className="border-t border-[var(--line)]">
       <div className="wrap py-20 sm:py-28">
         <div className="grid gap-10 lg:grid-cols-12">
           <div className="lg:col-span-4">
@@ -19,7 +19,7 @@ export function Position() {
             </h2>
             <p className="mt-5 max-w-sm text-[15.5px] leading-relaxed text-[var(--ink-2)]">
               Mesh VPNs join devices. Tunnel services publish URLs. urspace
-              admits a browser to one app.
+              admits a browser or a device to one app.
             </p>
           </div>
 
