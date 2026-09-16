@@ -17,7 +17,7 @@ const modes = [
   {
     cmd: 'urspace service invite boxclub --for "Alice / laptop"',
     title: 'Invite by name',
-    body: 'Label each invitation and default it to one seat. Manage the service from a second terminal over an authenticated loopback connection.',
+    body: 'Label each invitation and default it to one seat. Add --tcp to enroll a device instead of a browser.',
   },
 ]
 
@@ -32,8 +32,8 @@ export function Modes() {
 
         <ul className="mt-12 grid gap-px overflow-hidden rounded-[10px] border border-[var(--line)] bg-[var(--line)] sm:grid-cols-2">
           {modes.map((m) => (
-            <li key={m.cmd} className="group bg-[var(--paper)] p-6 sm:p-7">
-              <code className="block overflow-x-auto whitespace-nowrap font-[family-name:var(--font-mono)] text-[12.5px] text-[var(--ink)]">
+            <li key={m.cmd} className="min-w-0 bg-[var(--paper)] p-6 sm:p-7">
+              <code className="block whitespace-pre-wrap [overflow-wrap:anywhere] font-[family-name:var(--font-mono)] text-[12.5px] leading-relaxed text-[var(--ink)]">
                 <span className="text-[var(--ink-3)]">$ </span>
                 {m.cmd}
               </code>
