@@ -32,7 +32,9 @@ the signed grant, but cannot use it to enter the private site.
 - Kicks and revocations are stateful and take effect immediately. Signed grants
   never override host state.
 - The hosted application never receives the invitation capability or browser
-  session private key.
+  session private key. An application SDK that talks to a named loopback
+  backend on the same session must keep that rule; see
+  [app channels](app-channels.md).
 - Unknown versions, algorithms, fields, and non-canonical encodings fail closed.
 
 ## Identities
