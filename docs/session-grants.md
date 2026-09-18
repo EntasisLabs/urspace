@@ -166,6 +166,14 @@ An optional access label is inherited from the invitation and remains host-side
 administrative metadata. It helps an owner find a device in `service sessions`,
 but it is neither signed into the browser grant nor accepted as identity proof.
 
+Optional model time and usage caps are the same kind of host-side policy.
+They are keyed by `session_id`, inherited from the invitation at admission,
+and consulted on proxied model requests. Remaining balance must not be
+signed into the grant: a copied grant cannot spend more than the registry
+allows, and a client-reported token count is not authoritative. Exhausting
+a model budget denies further model calls; it does not, by itself, revoke
+the session. See [app channels](app-channels.md).
+
 ## Browser and Worker recovery
 
 The signed grant and session private key are separate recovery factors.

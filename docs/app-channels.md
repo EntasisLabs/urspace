@@ -167,7 +167,8 @@ App channels reuse protocol v4. They do not add a side-door token.
 | Question | Answer |
 | --- | --- |
 | Who may enter? | Possession of a current invitation, then a host-signed session grant |
-| Who may call the model? | An admitted session for that site, until kicked or revoked |
+| Who may call the model? | An admitted session for that site, until kicked, revoked, or over its host-side time/usage cap |
+| Does the visitor hold the model key? | No. The loopback adapter holds it. The WASM agent only has a session |
 | Does the site hold the secret? | No. The bootstrap and SDK drop the capability after admit |
 | Can a copied grant be replayed? | No. Resume needs the client private key and a fresh host nonce |
 | Can the client pick a different backend host? | No. The host dials only configured loopback origins |
@@ -184,6 +185,106 @@ app.
 Raw TCP stays an explicit `--tcp` invitation scope. A web SDK session does
 not inherit a tunnel mount.
 
+## Owner-held model key, WASM agent, session quota
+
+This is the flow that makes the SDK worth building.
+
+You serve a site. The agent loop runs in WASM in the visitor’s browser.
+That loop needs a model. The model key is yours, so the visitor must never
+type it, and the page must never ship it. Urspace is the hop from that
+WASM client to a loopback process that already has the key. The admitted
+session is the identity you meter.
+
+```text
+visitor browser
+  ├─ your site (UI)
+  └─ WASM agent loop
+         │  session grant + fresh proof
+         │  no model key
+         ▼
+urspace host
+  ├─ knows session_id, budget, expiry
+  └─ loopback model adapter (holds the key)
+         │
+         ▼
+localhost model / provider
+```
+
+Admission still works as it does today. The visitor opens an invitation
+(or resumes a grant). After that, `session_id` is a stable host-allocated
+identity for that browser. It is not “Alice.” It is “this admitted
+client.” One invitation with `--max-sessions 4` can create four separate
+meters. A one-person demo should use `--max-sessions 1`.
+
+The model key stays on the host side of the loopback adapter. The WASM
+agent only calls something like `session.fetch("/v1/chat")`. The adapter
+attaches the key, talks to the model, and returns the completion. If the
+site itself is also served through Urspace, that fetch is same-origin and
+the existing service worker already carries it. If the site is a public
+shell, the SDK opens the same session and the key still never enters the
+bundle.
+
+Quota is host policy, like kick. It is not a number in the signed grant
+and not a count the WASM reports.
+
+```text
+session_id -> {
+  ...existing grant registry...
+  model_expires_at?,
+  token_budget?,
+  tokens_used,
+}
+```
+
+On each proxied model request the host, or the loopback adapter it
+trusts, does three checks before the key is used:
+
+1. The session is still `active`.
+2. `now < model_expires_at` when a time cap was set.
+3. `tokens_used + estimated_cost <= token_budget` when a usage cap was
+   set.
+
+If any check fails, the site can stay up and the model call is denied
+(HTTP 429 or an equivalent framed error). That is better than kicking the
+session: the page can say the budget is gone. A kick remains available
+when you want the client gone entirely.
+
+Count from the authoritative upstream response (or from the request and
+response bodies the host actually proxied). Do not add a client-supplied
+`usage` field and believe it. The WASM agent is yours, but it runs on
+someone else’s computer.
+
+Budgets are inherited from the invitation at admission, the same way
+`max-sessions` and `allow_tcp` already are:
+
+```bash
+urspace serve localhost:5173 \
+  --backend model=localhost:11434 \
+  --session-ttl 30m \
+  --token-budget 50000 \
+  --max-sessions 1
+```
+
+`--session-ttl` is not today’s invite `--ttl`. Invite TTL is how long new
+people may enter. Session TTL is how long an admitted client may keep
+using the model. `--token-budget` is a usage cap on that same identity.
+Both are host-side. Putting remaining tokens into the grant would let an
+old copy disagree with the registry; the registry wins, so the grant
+should not carry a spendable balance.
+
+The operator view is the existing session list plus remaining budget.
+The page may ask for *its own* remaining quota over the admitted
+session. It must not be able to read another session’s meter, and the
+response must not include the invitation, the model key, or the proof
+key.
+
+`DenialCode` changes are not required for the first cut. Connection
+admission and model spend are different questions. A session can stay
+authorized for the site after its model budget is exhausted. A new denial
+code belongs only if we later refuse reconnects because a quota was
+exhausted, and that needs a protocol version and the usual negative
+tests.
+
 ## What not to do
 
 - Do not put an invitation fragment, capability, or session key in a public
@@ -195,6 +296,13 @@ not inherit a tunnel mount.
 - Do not add a second “app token” that bypasses session proofs.
 - Do not let the SDK name an arbitrary dial target. The host’s configured
   loopback list is the entire reachability set.
+- Do not put the model API key in the WASM agent, the page, or an
+  invitation. The loopback adapter is the only process that should hold
+  it.
+- Do not trust the client to report tokens used. Meter on the host from
+  the proxied model call.
+- Do not treat `session_id` as a login. It is one admitted browser. Share
+  an invite widely and you mint one budget per successful admission.
 
 ## Phased work
 
@@ -215,14 +323,20 @@ current clients before changing the wire format.
    expose that admitted session to application script without handing it
    the capability or proof key. The page asks the worker to `fetch` a
    named backend; it does not receive raw credentials.
-5. **Scoped invites (only if needed).** Versioned fields that limit which
+5. **Session quotas.** Host-side time and token caps inherited from the
+   invite, keyed by `session_id`, enforced on the model backend only.
+   Deny the model call; do not put remaining balance in the grant. Count
+   from the upstream response.
+6. **Scoped invites (only if needed).** Versioned fields that limit which
    backends or paths an invite may use, with the same negative tests as
    today’s grants.
 
 Phase 4 is the “wired by one application” moment for a browser agent: the
 visitor opens one link, the page runs an agent loop, and the model stays
 on the host. Phase 3 is the same thing for a non-browser client that
-should not have to mount a local port first.
+should not have to mount a local port first. Phase 5 is how the host
+turns that admitted identity into a timed or usage-capped model budget
+without giving the visitor the key.
 
 ## Why this stays an Urspace feature
 
