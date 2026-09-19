@@ -1,7 +1,8 @@
 # Urspace CLI
 
 The primary product path is one command and requires no account, DNS setup, or
-inbound firewall rule:
+inbound firewall rule. To embed the same host or client in a Rust or browser
+app, see [the SDK guide](sdk.md).
 
 ```bash
 urspace serve localhost:8787

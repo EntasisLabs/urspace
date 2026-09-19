@@ -108,6 +108,22 @@ To build from source instead:
 cargo install --locked --path crates/urspace-host
 ```
 
+## Embed Urspace in an app
+
+The CLI is the hands-off path. Rust and browser apps can use the same
+protocol directly:
+
+```toml
+urspace = { git = "https://github.com/EntasisLabs/urspace" }
+```
+
+```bash
+npm install @urspace/client
+```
+
+A host can still mint a secret invite URL, or mint a short-lived token bound
+to one browser key. See [the SDK guide](docs/sdk.md).
+
 ## Share an app
 
 First, start your app normally. If it is listening on `localhost:8787`, run:
@@ -285,7 +301,10 @@ short URL. The short-link service can see that a record was created or fetched,
 but it cannot read or change the invitation.
 
 For the protocol details, see [session grants](docs/session-grants.md). For the
-security model and current limitations, read [SECURITY.md](SECURITY.md).
+security model and current limitations, read [SECURITY.md](SECURITY.md). If the
+thing you want to share is not only a website, but a site that should call a
+private agent or model without standing up a public API, see the
+[app channels](docs/app-channels.md) design.
 
 ## Developing Urspace
 

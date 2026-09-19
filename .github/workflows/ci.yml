@@ -35,6 +35,9 @@ jobs:
       - name: Test browser bootstrap
         working-directory: apps/bootstrap
         run: npm test
+      - name: Test JavaScript client package
+        working-directory: packages/client
+        run: npm test
       - name: Build and check Cloudflare Worker
         working-directory: deploy/cloudflare-worker
         run: npm run check

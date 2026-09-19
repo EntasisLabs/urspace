@@ -13,9 +13,13 @@ use uuid::Uuid;
 pub const ALPN: &[u8] = b"urspace-site/4";
 pub const TUNNEL_ALPN: &[u8] = b"urspace-tunnel/1";
 pub const INVITE_VERSION: u8 = 4;
+pub const SUBJECT_INVITE_VERSION: u8 = 1;
 pub const TUNNEL_VERSION: u8 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const BOOTSTRAP_PATH: &str = "/.urspace/open/";
+const SUBJECT_INVITE_PREFIX: &str = "usi1.";
+const SUBJECT_INVITE_DOMAIN: &[u8] = b"urspace-subject-invite-v1\0";
+const MAX_SUBJECT_INVITE_BYTES: usize = 16 * 1024;
 
 pub const LEGACY_V3_ALPN: &[u8] = b"urspace-site/3";
 pub const LEGACY_V3_INVITE_VERSION: u8 = 3;
@@ -47,6 +51,40 @@ pub struct InviteGrant {
     pub expires_at_unix: i64,
     pub entry_path: String,
     pub max_sessions: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubjectInvitePayload {
+    pub version: u8,
+    pub host_id: [u8; 32],
+    pub site_id: String,
+    pub bootstrap_origin: String,
+    pub endpoint_ticket: String,
+    pub invite_id: Uuid,
+    pub capability: [u8; 32],
+    pub subject: [u8; 32],
+    pub expires_at_unix: i64,
+    pub max_sessions: u32,
+    pub entry_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubjectInviteIssue {
+    pub bootstrap_origin: String,
+    pub endpoint_ticket: String,
+    pub invite_id: Uuid,
+    pub capability: [u8; 32],
+    pub subject: [u8; 32],
+    pub expires_at_unix: i64,
+    pub max_sessions: u32,
+    pub entry_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SignedSubjectInvite {
+    payload: SubjectInvitePayload,
+    signer: [u8; 32],
+    signature: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +292,10 @@ pub enum InviteError {
     Expired,
     #[error("entry path must be an absolute site path")]
     InvalidEntryPath,
+    #[error("subject-bound invitation is bound to a different session key")]
+    SubjectMismatch,
+    #[error("subject-bound invitation subject is invalid")]
+    InvalidSubject,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -482,6 +524,129 @@ fn domain_message(domain: &[u8], payload: &[u8]) -> Vec<u8> {
 
 pub fn sign_invite(identity: &SecretKey, grant: InviteGrant) -> Result<String, InviteError> {
     sign_invite_version(identity, grant, INVITE_VERSION)
+}
+
+pub fn sign_subject_invite(
+    identity: &SecretKey,
+    issue: SubjectInviteIssue,
+) -> Result<String, InviteError> {
+    if issue.max_sessions == 0 {
+        return Err(InviteError::InvalidEncoding);
+    }
+    if issue.expires_at_unix <= 0 {
+        return Err(InviteError::Expired);
+    }
+    PublicKey::from_bytes(&issue.subject).map_err(|_| InviteError::InvalidSubject)?;
+    validate_entry_path(&issue.entry_path)?;
+    let bootstrap_origin = normalize_bootstrap_origin(&issue.bootstrap_origin)?;
+    let payload = SubjectInvitePayload {
+        version: SUBJECT_INVITE_VERSION,
+        host_id: *identity.public().as_bytes(),
+        site_id: identity.public().to_z32(),
+        bootstrap_origin,
+        endpoint_ticket: issue.endpoint_ticket,
+        invite_id: issue.invite_id,
+        capability: issue.capability,
+        subject: issue.subject,
+        expires_at_unix: issue.expires_at_unix,
+        max_sessions: issue.max_sessions,
+        entry_path: issue.entry_path,
+    };
+    validate_subject_invite_payload(&payload, None)?;
+    let payload_bytes =
+        postcard::to_allocvec(&payload).map_err(|_| InviteError::InvalidEncoding)?;
+    let signed = SignedSubjectInvite {
+        payload,
+        signer: *identity.public().as_bytes(),
+        signature: identity
+            .sign(&domain_message(SUBJECT_INVITE_DOMAIN, &payload_bytes))
+            .to_bytes()
+            .to_vec(),
+    };
+    let encoded = postcard::to_allocvec(&signed).map_err(|_| InviteError::InvalidEncoding)?;
+    if encoded.len() > MAX_SUBJECT_INVITE_BYTES {
+        return Err(InviteError::InvalidEncoding);
+    }
+    Ok(format!(
+        "{SUBJECT_INVITE_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(encoded)
+    ))
+}
+
+pub fn verify_subject_invite(
+    encoded: &str,
+    now_unix: i64,
+) -> Result<SubjectInvitePayload, InviteError> {
+    let value = encoded
+        .strip_prefix(SUBJECT_INVITE_PREFIX)
+        .ok_or(InviteError::InvalidEncoding)?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| InviteError::InvalidEncoding)?;
+    if bytes.is_empty() || bytes.len() > MAX_SUBJECT_INVITE_BYTES {
+        return Err(InviteError::InvalidEncoding);
+    }
+    let signed: SignedSubjectInvite =
+        postcard::from_bytes(&bytes).map_err(|_| InviteError::InvalidEncoding)?;
+    let canonical = postcard::to_allocvec(&signed).map_err(|_| InviteError::InvalidEncoding)?;
+    if canonical != bytes {
+        return Err(InviteError::InvalidEncoding);
+    }
+    validate_subject_invite_payload(&signed.payload, Some(now_unix))?;
+    if signed.signer != signed.payload.host_id {
+        return Err(InviteError::SiteIdentityMismatch);
+    }
+    let public =
+        PublicKey::from_bytes(&signed.signer).map_err(|_| InviteError::InvalidSignature)?;
+    let signature_bytes: [u8; Signature::LENGTH] = signed
+        .signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| InviteError::InvalidSignature)?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    let payload_bytes =
+        postcard::to_allocvec(&signed.payload).map_err(|_| InviteError::InvalidEncoding)?;
+    public
+        .verify(
+            &domain_message(SUBJECT_INVITE_DOMAIN, &payload_bytes),
+            &signature,
+        )
+        .map_err(|_| InviteError::InvalidSignature)?;
+    Ok(signed.payload)
+}
+
+fn validate_subject_invite_payload(
+    payload: &SubjectInvitePayload,
+    now_unix: Option<i64>,
+) -> Result<(), InviteError> {
+    if payload.version != SUBJECT_INVITE_VERSION {
+        return Err(InviteError::UnsupportedVersion);
+    }
+    if payload.max_sessions == 0 {
+        return Err(InviteError::InvalidEncoding);
+    }
+    if payload.expires_at_unix <= 0 {
+        return Err(InviteError::Expired);
+    }
+    if now_unix.is_some_and(|now| payload.expires_at_unix <= now) {
+        return Err(InviteError::Expired);
+    }
+    validate_entry_path(&payload.entry_path)?;
+    if normalize_bootstrap_origin(&payload.bootstrap_origin)? != payload.bootstrap_origin {
+        return Err(InviteError::InvalidBootstrapUrl);
+    }
+    let public =
+        PublicKey::from_bytes(&payload.host_id).map_err(|_| InviteError::InvalidSignature)?;
+    if public.to_z32() != payload.site_id {
+        return Err(InviteError::SiteIdentityMismatch);
+    }
+    let ticket = EndpointTicket::from_str(&payload.endpoint_ticket)
+        .map_err(|_| InviteError::EndpointMismatch)?;
+    if ticket.endpoint_addr().id != public {
+        return Err(InviteError::EndpointMismatch);
+    }
+    PublicKey::from_bytes(&payload.subject).map_err(|_| InviteError::InvalidSubject)?;
+    Ok(())
 }
 
 fn sign_invite_version(
@@ -1021,6 +1186,148 @@ mod tests {
         assert!(matches!(
             sign_session_proof(&session, &proof),
             Err(SessionGrantError::InvalidProof)
+        ));
+    }
+
+    fn subject_fixture(expiry: i64) -> (SecretKey, SecretKey, String, [u8; 32]) {
+        let host = SecretKey::generate();
+        let session = SecretKey::generate();
+        let capability = [11_u8; 32];
+        let encoded = sign_subject_invite(
+            &host,
+            SubjectInviteIssue {
+                bootstrap_origin: "https://sites.example".into(),
+                endpoint_ticket: EndpointTicket::new(EndpointAddr::new(host.public())).to_string(),
+                invite_id: Uuid::from_u128(9),
+                capability,
+                subject: *session.public().as_bytes(),
+                expires_at_unix: expiry,
+                max_sessions: 1,
+                entry_path: "/".into(),
+            },
+        )
+        .unwrap();
+        (host, session, encoded, capability)
+    }
+
+    #[test]
+    fn subject_invites_round_trip_and_are_not_bearer_urls() {
+        let (host, session, encoded, capability) = subject_fixture(2_000);
+        assert!(encoded.starts_with("usi1."));
+        let payload = verify_subject_invite(&encoded, 1_000).unwrap();
+        assert_eq!(payload.host_id, *host.public().as_bytes());
+        assert_eq!(payload.subject, *session.public().as_bytes());
+        assert_eq!(payload.capability, capability);
+        assert_eq!(payload.max_sessions, 1);
+        assert!(invite_url(&encoded).is_err());
+        assert!(verify_invite_url(&encoded, 1_000).is_err());
+    }
+
+    #[test]
+    fn subject_invite_tampering_and_expiry_are_rejected() {
+        let (_, _, encoded, _) = subject_fixture(2_000);
+        let raw = encoded.strip_prefix("usi1.").unwrap();
+        let mut bytes = URL_SAFE_NO_PAD.decode(raw).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 1;
+        let tampered = format!("usi1.{}", URL_SAFE_NO_PAD.encode(bytes));
+        assert!(verify_subject_invite(&tampered, 1_000).is_err());
+        assert!(matches!(
+            verify_subject_invite(&encoded, 2_000),
+            Err(InviteError::Expired)
+        ));
+    }
+
+    #[test]
+    fn subject_invite_rejects_subject_and_signer_substitution() {
+        let (host, session, encoded, capability) = subject_fixture(2_000);
+        let attacker = SecretKey::generate();
+        let substituted = sign_subject_invite(
+            &host,
+            SubjectInviteIssue {
+                bootstrap_origin: "https://sites.example".into(),
+                endpoint_ticket: EndpointTicket::new(EndpointAddr::new(host.public())).to_string(),
+                invite_id: Uuid::from_u128(9),
+                capability,
+                subject: *attacker.public().as_bytes(),
+                expires_at_unix: 2_000,
+                max_sessions: 1,
+                entry_path: "/".into(),
+            },
+        )
+        .unwrap();
+        let original = verify_subject_invite(&encoded, 1_000).unwrap();
+        let swapped = verify_subject_invite(&substituted, 1_000).unwrap();
+        assert_ne!(original.subject, swapped.subject);
+        assert_eq!(swapped.subject, *attacker.public().as_bytes());
+        assert_ne!(swapped.subject, *session.public().as_bytes());
+
+        let forged = sign_subject_invite(
+            &attacker,
+            SubjectInviteIssue {
+                bootstrap_origin: "https://sites.example".into(),
+                endpoint_ticket: EndpointTicket::new(EndpointAddr::new(host.public())).to_string(),
+                invite_id: Uuid::from_u128(9),
+                capability,
+                subject: *session.public().as_bytes(),
+                expires_at_unix: 2_000,
+                max_sessions: 1,
+                entry_path: "/".into(),
+            },
+        );
+        assert!(forged.is_err());
+    }
+
+    #[test]
+    fn subject_invite_unknown_version_and_zero_uses_fail_closed() {
+        let host = SecretKey::generate();
+        let session = SecretKey::generate();
+        assert!(matches!(
+            sign_subject_invite(
+                &host,
+                SubjectInviteIssue {
+                    bootstrap_origin: "https://sites.example".into(),
+                    endpoint_ticket: EndpointTicket::new(EndpointAddr::new(host.public()))
+                        .to_string(),
+                    invite_id: Uuid::nil(),
+                    capability: [1_u8; 32],
+                    subject: *session.public().as_bytes(),
+                    expires_at_unix: 2_000,
+                    max_sessions: 0,
+                    entry_path: "/".into(),
+                },
+            ),
+            Err(InviteError::InvalidEncoding)
+        ));
+
+        let encoded = sign_subject_invite(
+            &host,
+            SubjectInviteIssue {
+                bootstrap_origin: "https://sites.example".into(),
+                endpoint_ticket: EndpointTicket::new(EndpointAddr::new(host.public())).to_string(),
+                invite_id: Uuid::nil(),
+                capability: [1_u8; 32],
+                subject: *session.public().as_bytes(),
+                expires_at_unix: 2_000,
+                max_sessions: 1,
+                entry_path: "/".into(),
+            },
+        )
+        .unwrap();
+        let raw = encoded.strip_prefix("usi1.").unwrap();
+        let mut bytes = URL_SAFE_NO_PAD.decode(raw).unwrap();
+        let mut signed: SignedSubjectInvite = postcard::from_bytes(&bytes).unwrap();
+        signed.payload.version = 9;
+        let payload_bytes = postcard::to_allocvec(&signed.payload).unwrap();
+        signed.signature = host
+            .sign(&domain_message(SUBJECT_INVITE_DOMAIN, &payload_bytes))
+            .to_bytes()
+            .to_vec();
+        bytes = postcard::to_allocvec(&signed).unwrap();
+        let unknown = format!("usi1.{}", URL_SAFE_NO_PAD.encode(bytes));
+        assert!(matches!(
+            verify_subject_invite(&unknown, 1_000),
+            Err(InviteError::UnsupportedVersion)
         ));
     }
 }

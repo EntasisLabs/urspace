@@ -32,7 +32,9 @@ the signed grant, but cannot use it to enter the private site.
 - Kicks and revocations are stateful and take effect immediately. Signed grants
   never override host state.
 - The hosted application never receives the invitation capability or browser
-  session private key.
+  session private key. An application SDK that talks to a named loopback
+  backend on the same session must keep that rule; see
+  [app channels](app-channels.md).
 - Unknown versions, algorithms, fields, and non-canonical encodings fail closed.
 
 ## Identities
@@ -48,6 +50,18 @@ the signed grant, but cannot use it to enter the private site.
 Separating `session_key` from `endpoint_id` allows a browser to create a fresh
 Iroh endpoint after worker eviction while the host continues to recognize the
 same admitted session.
+
+Today’s invitation is a bearer capability: the host mints it first, and the
+browser may present any `session_public_key` at admit. That URL-as-secret
+mode remains the default and keeps its current CLI and bootstrap behavior.
+
+A later subject-bound mint, described in [app channels](app-channels.md),
+is an additional enrollment path on the same host. The browser shows its
+session public key, the host signs that key into the invite as `subject`,
+and Admit fails closed unless the two match. The challenge and proof do
+not change. The mint endpoint is then the admission policy; that invite
+blob is not a transferable secret. A host may accept both kinds. It must
+not treat a subject-bound invite as a bearer URL, or the reverse.
 
 ## Signed grant
 
@@ -163,6 +177,14 @@ plaintext or a browser private key.
 An optional access label is inherited from the invitation and remains host-side
 administrative metadata. It helps an owner find a device in `service sessions`,
 but it is neither signed into the browser grant nor accepted as identity proof.
+
+Optional model time and usage caps are the same kind of host-side policy.
+They are keyed by `session_id`, inherited from the invitation at admission,
+and consulted on proxied model requests. Remaining balance must not be
+signed into the grant: a copied grant cannot spend more than the registry
+allows, and a client-reported token count is not authoritative. Exhausting
+a model budget denies further model calls; it does not, by itself, revoke
+the session. See [app channels](app-channels.md).
 
 ## Browser and Worker recovery
 

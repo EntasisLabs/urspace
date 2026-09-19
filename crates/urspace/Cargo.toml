@@ -1,0 +1,14 @@
+[package]
+name = "urspace"
+version.workspace = true
+edition.workspace = true
+publish = true
+license.workspace = true
+repository.workspace = true
+description = "Embed Urspace hosts and clients in Rust applications"
+readme = "README.md"
+
+[dependencies]
+iroh.workspace = true
+urspace-host = { path = "../urspace-host" }
+urspace-protocol = { path = "../urspace-protocol" }

@@ -4,6 +4,7 @@ members = [
     "crates/urspace-host",
     "crates/urspace-browser",
     "crates/urspace-bootstrap",
+    "crates/urspace",
 ]
 resolver = "3"
 

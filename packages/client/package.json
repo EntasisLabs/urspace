@@ -1,0 +1,35 @@
+{
+  "name": "@urspace/client",
+  "version": "0.5.0",
+  "description": "Browser client for Urspace bearer invites and subject-bound mint tokens",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "wasm",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EntasisLabs/urspace.git",
+    "directory": "packages/client"
+  },
+  "scripts": {
+    "build": "bash ../../scripts/build-js-client.sh",
+    "test": "node --test"
+  },
+  "keywords": [
+    "urspace",
+    "iroh",
+    "private",
+    "invitation"
+  ]
+}

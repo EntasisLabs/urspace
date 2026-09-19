@@ -16,7 +16,7 @@ use urspace_protocol::{
     SESSION_PROOF_VERSION, ServerAuthV4, ServerHelloV4, SessionGrantPayload, SessionProofPayload,
     SessionProofPurpose, SiteRequest, SiteResponseHead, SocketMessage, TUNNEL_ALPN, TUNNEL_VERSION,
     TunnelOpenV1, TunnelStatusV1, read_frame, session_grant_hash, sign_session_proof,
-    verify_invite_url, verify_session_grant, write_frame,
+    verify_invite_url, verify_session_grant, verify_subject_invite, write_frame,
 };
 use zeroize::{Zeroize as _, Zeroizing};
 
@@ -88,6 +88,95 @@ impl Drop for NativeSiteClient {
 }
 
 impl NativeSiteClient {
+    /// Connect with a bearer invitation URL without writing a device file.
+    pub async fn connect(invitation_url: &str, now_unix: i64) -> Result<Self> {
+        let session_key = SecretKey::generate();
+        Self::admit_invite(invitation_url, session_key, NativeTransport::Web, now_unix).await
+    }
+
+    /// Connect with a subject-bound mint token and the matching session key.
+    pub async fn connect_minted(
+        token: &str,
+        session_key: SecretKey,
+        now_unix: i64,
+    ) -> Result<Self> {
+        let mut invite = verify_subject_invite(token, now_unix)
+            .context("the subject-bound invitation was rejected")?;
+        if invite.subject != *session_key.public().as_bytes() {
+            invite.capability.zeroize();
+            bail!("session key does not match the subject-bound invitation");
+        }
+        let endpoint_addr = ticket_addr(&invite.endpoint_ticket)?;
+        let endpoint = bind_endpoint().await?;
+        let authorization = ClientAuthV4::Admit {
+            invite_id: invite.invite_id,
+            capability: std::mem::take(&mut invite.capability),
+            session_public_key: *session_key.public().as_bytes(),
+        };
+        let (connection, session_grant, grant) = authorize(
+            &endpoint,
+            &endpoint_addr,
+            authorization,
+            &session_key,
+            None,
+            NativeTransport::Web.alpn(),
+            now_unix,
+        )
+        .await?;
+        Ok(Self::new(
+            endpoint,
+            endpoint_addr,
+            connection,
+            session_grant,
+            Zeroizing::new(session_key.to_bytes()),
+            grant,
+            random_local_origin_label(),
+            0,
+            NativeTransport::Web,
+        ))
+    }
+
+    async fn admit_invite(
+        invitation_url: &str,
+        session_key: SecretKey,
+        transport: NativeTransport,
+        now_unix: i64,
+    ) -> Result<Self> {
+        let mut invite = verify_invite_url(invitation_url, now_unix)
+            .context("the enrollment invitation was rejected")?;
+        if invite.version != INVITE_VERSION {
+            bail!("native clients require a current Urspace invitation");
+        }
+        let endpoint_addr = ticket_addr(&invite.endpoint_ticket)?;
+        let endpoint = bind_endpoint().await?;
+        let authorization = ClientAuthV4::Admit {
+            invite_id: invite.invite_id,
+            capability: std::mem::take(&mut invite.capability),
+            session_public_key: *session_key.public().as_bytes(),
+        };
+        let (connection, session_grant, grant) = authorize(
+            &endpoint,
+            &endpoint_addr,
+            authorization,
+            &session_key,
+            None,
+            transport.alpn(),
+            now_unix,
+        )
+        .await?;
+        Ok(Self::new(
+            endpoint,
+            endpoint_addr,
+            connection,
+            session_grant,
+            Zeroizing::new(session_key.to_bytes()),
+            grant,
+            random_local_origin_label(),
+            0,
+            transport,
+        ))
+    }
+
     pub async fn enroll(
         invitation_url: &str,
         session_path: PathBuf,
