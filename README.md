@@ -108,6 +108,22 @@ To build from source instead:
 cargo install --locked --path crates/urspace-host
 ```
 
+## Embed Urspace in an app
+
+The CLI is the hands-off path. Rust and browser apps can use the same
+protocol directly:
+
+```toml
+urspace = { git = "https://github.com/EntasisLabs/urspace" }
+```
+
+```bash
+npm install @urspace/client
+```
+
+A host can still mint a secret invite URL, or mint a short-lived token bound
+to one browser key. See [the SDK guide](docs/sdk.md).
+
 ## Share an app
 
 First, start your app normally. If it is listening on `localhost:8787`, run:

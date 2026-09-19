@@ -31,6 +31,7 @@ use urspace_protocol::{
 };
 use uuid::Uuid;
 
+pub mod embed;
 pub mod native_client;
 
 const MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 64;
@@ -97,6 +98,8 @@ enum RegistryEvent {
         allow_tcp: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         access_label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<[u8; 32]>,
     },
     AdmissionsClosed {
         invite_id: Uuid,
@@ -146,6 +149,7 @@ struct InviteRecord {
     remaining_sessions: u32,
     allow_tcp: bool,
     access_label: Option<String>,
+    subject: Option<[u8; 32]>,
     admitted_sessions: HashSet<Uuid>,
     admissions_closed: bool,
     revoked: bool,
@@ -276,6 +280,7 @@ impl CapabilityRegistry {
             max_sessions,
             access_label,
             false,
+            None,
         )
     }
 
@@ -294,9 +299,30 @@ impl CapabilityRegistry {
             max_sessions,
             access_label,
             true,
+            None,
         )
     }
 
+    pub fn insert_subject_bound(
+        &self,
+        invite_id: Uuid,
+        capability: &[u8; 32],
+        subject: [u8; 32],
+        expires_at_unix: i64,
+        max_sessions: u32,
+    ) -> Result<(), RegistryError> {
+        self.insert_for_access(
+            invite_id,
+            capability,
+            expires_at_unix,
+            max_sessions,
+            None,
+            false,
+            Some(subject),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn insert_for_access(
         &self,
         invite_id: Uuid,
@@ -305,6 +331,7 @@ impl CapabilityRegistry {
         max_sessions: u32,
         access_label: Option<String>,
         allow_tcp: bool,
+        subject: Option<[u8; 32]>,
     ) -> Result<(), RegistryError> {
         let event = RegistryEvent::InviteInserted {
             invite_id,
@@ -313,6 +340,7 @@ impl CapabilityRegistry {
             max_sessions,
             allow_tcp,
             access_label,
+            subject,
         };
         let mut guard = self.inner.lock().expect("capability registry poisoned");
         if max_sessions == 0 || guard.invites.contains_key(&invite_id) {
@@ -346,6 +374,19 @@ impl CapabilityRegistry {
         }
         if record.remaining_sessions == 0 {
             return Err(DenialCode::SessionLimit);
+        }
+        Ok(())
+    }
+
+    pub fn require_subject(
+        &self,
+        invite_id: Uuid,
+        session_public_key: &[u8; 32],
+    ) -> Result<(), DenialCode> {
+        let guard = self.inner.lock().expect("capability registry poisoned");
+        let record = guard.invites.get(&invite_id).ok_or(DenialCode::Invalid)?;
+        if !subject_matches(record, session_public_key) {
+            return Err(DenialCode::Invalid);
         }
         Ok(())
     }
@@ -438,6 +479,9 @@ impl CapabilityRegistry {
         }
         if record.remaining_sessions == 0 {
             return Err(DenialCode::SessionLimit.into());
+        }
+        if !subject_matches(record, &session.session_public_key) {
+            return Err(DenialCode::Invalid.into());
         }
         let event = RegistryEvent::SessionAdmitted {
             invite_id,
@@ -865,6 +909,7 @@ fn apply_registry_event(
             max_sessions,
             allow_tcp,
             access_label,
+            subject,
         } => {
             if max_sessions == 0 || state.invites.contains_key(&invite_id) {
                 return Err(invalid_registry_event());
@@ -877,6 +922,7 @@ fn apply_registry_event(
                     remaining_sessions: max_sessions,
                     allow_tcp,
                     access_label,
+                    subject,
                     admitted_sessions: HashSet::new(),
                     admissions_closed: false,
                     revoked: false,
@@ -1078,6 +1124,13 @@ fn random_operator_handle(state: &RegistryState) -> [u8; 8] {
 
 fn display_operator_handle(handle: [u8; 8]) -> String {
     format!("session-{}", URL_SAFE_NO_PAD.encode(handle))
+}
+
+fn subject_matches(record: &InviteRecord, session_public_key: &[u8; 32]) -> bool {
+    match record.subject {
+        None => true,
+        Some(expected) => expected.ct_eq(session_public_key).unwrap_u8() == 1,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1429,6 +1482,8 @@ impl SiteProtocol {
                 } else {
                     self.registry.can_admit(invite_id, &capability, now_unix)?;
                 }
+                self.registry
+                    .require_subject(invite_id, &session_public_key)?;
                 Ok(PendingAuthorization::Admit {
                     invite_id,
                     capability,
@@ -2147,6 +2202,50 @@ mod tests {
             *session_key.public().as_bytes(),
         );
         assert!(registry.can_resume_tcp(&issued).is_ok());
+    }
+
+    #[test]
+    fn subject_bound_invites_reject_a_different_session_key() {
+        let registry = CapabilityRegistry::default();
+        let invite_id = Uuid::new_v4();
+        let capability = [21_u8; 32];
+        let bound = SecretKey::generate();
+        let other = SecretKey::generate();
+        let endpoint = SecretKey::generate().public();
+        registry
+            .insert_subject_bound(invite_id, &capability, *bound.public().as_bytes(), 200, 1)
+            .unwrap();
+
+        assert_eq!(
+            registry.require_subject(invite_id, other.public().as_bytes()),
+            Err(DenialCode::Invalid)
+        );
+        assert!(
+            registry
+                .require_subject(invite_id, bound.public().as_bytes())
+                .is_ok()
+        );
+        assert!(matches!(
+            registry.admit(
+                invite_id,
+                &capability,
+                Uuid::new_v4(),
+                *other.public().as_bytes(),
+                endpoint,
+                100,
+            ),
+            Err(RegistryError::Denied(DenialCode::Invalid))
+        ));
+        registry
+            .admit(
+                invite_id,
+                &capability,
+                Uuid::new_v4(),
+                *bound.public().as_bytes(),
+                endpoint,
+                100,
+            )
+            .unwrap();
     }
 
     #[test]

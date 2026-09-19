@@ -15,7 +15,8 @@ use urspace_protocol::{
     SESSION_PROOF_VERSION, ServerAuthV4, ServerHello, ServerHelloV4, SessionGrantPayload,
     SessionProofPayload, SessionProofPurpose, SiteRequest, SiteResponseHead, SocketMessage,
     alpn_for_invite, read_frame, session_grant_hash, session_grant_origin, sign_session_proof,
-    verify_invite_url, verify_invite_url_for_resume, verify_session_grant, write_frame,
+    verify_invite_url, verify_invite_url_for_resume, verify_session_grant, verify_subject_invite,
+    write_frame,
 };
 use uuid::Uuid;
 use wasm_bindgen::{JsError, JsValue, prelude::wasm_bindgen};
@@ -64,6 +65,49 @@ enum SessionAuthorization {
 
 #[wasm_bindgen]
 impl SiteClient {
+    #[wasm_bindgen(js_name = generateSessionKey)]
+    pub fn generate_session_key() -> Vec<u8> {
+        iroh::SecretKey::generate().to_bytes().to_vec()
+    }
+
+    #[wasm_bindgen(js_name = sessionPublicKey)]
+    pub fn session_public_key(mut session_secret: Vec<u8>) -> Result<Vec<u8>, JsError> {
+        let key_bytes: [u8; 32] = match session_secret.as_slice().try_into() {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                session_secret.zeroize();
+                return Err(JsError::new("session key is invalid"));
+            }
+        };
+        session_secret.zeroize();
+        let key = iroh::SecretKey::from_bytes(&key_bytes);
+        Ok(key.public().as_bytes().to_vec())
+    }
+
+    #[wasm_bindgen(js_name = connectMinted)]
+    pub async fn connect_minted(
+        mut token: String,
+        mut session_secret: Vec<u8>,
+        now_unix: f64,
+    ) -> Result<Self, JsError> {
+        if !now_unix.is_finite() || now_unix < 0.0 || now_unix > i64::MAX as f64 {
+            token.zeroize();
+            session_secret.zeroize();
+            return Err(JsError::new("browser clock is outside the supported range"));
+        }
+        let key_bytes: [u8; 32] = match session_secret.as_slice().try_into() {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                token.zeroize();
+                session_secret.zeroize();
+                return Err(JsError::new("session key is invalid"));
+            }
+        };
+        session_secret.zeroize();
+        let now_unix = now_unix.floor() as i64;
+        Self::establish_minted(token, Zeroizing::new(key_bytes), now_unix).await
+    }
+
     #[wasm_bindgen(js_name = connect)]
     pub async fn connect(mut invitation_url: String, now_unix: f64) -> Result<Self, JsError> {
         if !now_unix.is_finite() || now_unix < 0.0 || now_unix > i64::MAX as f64 {
@@ -225,6 +269,64 @@ impl SiteClient {
 }
 
 impl SiteClient {
+    async fn establish_minted(
+        mut token: String,
+        session_key: Zeroizing<[u8; 32]>,
+        now_unix: i64,
+    ) -> Result<Self, JsError> {
+        let mut invite = match verify_subject_invite(&token, now_unix) {
+            Ok(invite) => invite,
+            Err(error) => {
+                token.zeroize();
+                return Err(JsError::new(&format!("invitation rejected: {error}")));
+            }
+        };
+        token.zeroize();
+        let session_secret = iroh::SecretKey::from_bytes(&session_key);
+        if invite.subject != *session_secret.public().as_bytes() {
+            invite.capability.zeroize();
+            return Err(JsError::new(
+                "session key does not match the subject-bound invitation",
+            ));
+        }
+        let capability = Zeroizing::new(std::mem::take(&mut invite.capability));
+        let endpoint_addr = endpoint_addr_from_ticket(&invite.endpoint_ticket)?;
+        let endpoint = bind_browser_endpoint(&endpoint_addr, iroh::SecretKey::generate()).await?;
+        let auth = ClientAuthV4::Admit {
+            invite_id: invite.invite_id,
+            capability: *capability,
+            session_public_key: *session_secret.public().as_bytes(),
+        };
+        let authorized = connect_and_authorize_v4(
+            &endpoint,
+            &endpoint_addr,
+            auth,
+            &session_secret,
+            None,
+            now_unix,
+        )
+        .await;
+        let (connection, session_grant, grant) = match authorized {
+            Ok(authorized) => authorized,
+            Err(error) => {
+                endpoint.close().await;
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            endpoint,
+            endpoint_addr,
+            connection: Mutex::new(connection),
+            authorization: SessionAuthorization::Grant {
+                session_grant,
+                session_key,
+            },
+            closed: AtomicBool::new(false),
+            entry_path: grant.entry_path,
+            site_id: grant.site_id,
+        })
+    }
+
     async fn establish_invite(mut invitation_url: String, now_unix: i64) -> Result<Self, JsError> {
         let mut invite = match verify_invite_url(&invitation_url, now_unix) {
             Ok(invite) => invite,

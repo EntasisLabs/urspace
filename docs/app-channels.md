@@ -423,8 +423,9 @@ tests.
 
 ## Phased work
 
-None of this is implemented yet. The order is deliberate: reuse the
-current clients before changing the wire format.
+Bearer URLs, subject-bound `usi1.` tokens, and the Cargo / npm clients
+are implemented. Named backends and session quotas are not. The remaining
+order is deliberate: reuse those clients before adding more wire format.
 
 1. **Document the existing pattern.** Ship the agent UI and model behind
    one loopback app and one `urspace serve`. This already solves the
@@ -432,10 +433,9 @@ current clients before changing the wire format.
 2. **Named loopback backends.** One site identity, extra
    `--backend name=localhost:port` targets, still protocol v4. Fail closed
    on unknown names and non-loopback origins.
-3. **Publish the client.** Extract the WASM `SiteClient` and the native
-   connect client behind one small API (`connect`, `resume`, `fetch`,
-   `socket`, `close`) for pages and applications that already have an
-   invite.
+3. **Publish the client.** The `urspace` crate and `@urspace/client`
+   expose `connect`, `connectMinted`, `fetch`, and host-side `mint`. See
+   [the SDK guide](sdk.md).
 4. **Same-tab injection.** When Urspace is already serving the page,
    expose that admitted session to application script without handing it
    the capability or proof key. The page asks the worker to `fetch` a

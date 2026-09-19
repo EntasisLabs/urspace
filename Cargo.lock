@@ -3704,6 +3704,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "urspace"
+version = "0.5.0"
+dependencies = [
+ "iroh",
+ "urspace-host",
+ "urspace-protocol",
+]
+
+[[package]]
 name = "urspace-bootstrap"
 version = "0.5.0"
 dependencies = [
