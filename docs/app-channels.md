@@ -221,8 +221,84 @@ agent only calls something like `session.fetch("/v1/chat")`. The adapter
 attaches the key, talks to the model, and returns the completion. If the
 site itself is also served through Urspace, that fetch is same-origin and
 the existing service worker already carries it. If the site is a public
-shell, the SDK opens the same session and the key still never enters the
-bundle.
+shell, the page only needs the host’s public routing data; the SDK then
+runs the handshake below. The key still never enters the bundle.
+
+## Subject-bound mint, then the existing challenge
+
+The public-site handshake people draw is this, and it is almost
+protocol v4 already:
+
+```text
+Browser loads
+    ↓
+generate ephemeral session keypair
+    ↓
+private key stays in browser
+public key = browser identity
+    ↓
+Mint { session_public_key }
+    ↓
+host signs a subject-bound invite
+{
+  subject: session_public_key,
+  role: "web-agent",
+  service: "inference",
+  expires: now+30s,
+  uses: 1
+}
+    ↓
+browser -> host  Admit { invite_id, invite, session_public_key }
+host    -> browser  Challenge { nonce, challenge_id, expires_at_unix }
+browser -> host  Proof { challenge_id, signature }
+    ↓
+host verifies
+  invite signature
+  invite TTL
+  invite unused
+  session_public_key == invite.subject
+  proof over the host nonce
+    ↓
+Granted { session_grant }
+    ↓
+CONNECTED — model calls metered on session_id
+```
+
+Map that onto names that already exist. The keypair is today’s
+`session_key`. The challenge and proof are the v4 admit transcript.
+`uses: 1` is `max_sessions: 1`. The 30-second clock is invite TTL: finish
+the handshake now. It is not the model budget. After `Granted`, reconnects
+use the session grant and a fresh proof, exactly as
+[session grants](session-grants.md) already specify.
+
+Two things are new.
+
+**1. The invite is bound to the key before admit.** Today’s invitation is
+a bearer capability. Whoever has the URL may present any
+`session_public_key`. In this mode the host sees the public key first and
+signs `subject` into the invite. Stealing the mint response is useless
+without the browser private key. That is what makes it safe to hand an
+invite to a page you do not consider secret.
+
+**2. Minting is the public gate.** Today the operator mints the invite
+with the CLI and sends it to a person. Here anyone who can load the site
+can ask for a ticket. `POST /bootstrap` (or an in-band `Mint` on the Iroh
+connection) is therefore not a lock. It is a policy hook: rate limit,
+global token pool, captcha, or “no more invites this hour.” The host still
+signs. The public website must not hold the host identity key. The page
+may know `host_id` and the endpoint ticket; those are routing, not
+authority.
+
+A first cut can keep mint and admit as two host messages so the
+single-use invite stays inspectable. They can later collapse into one
+round trip. Either way the hosted application still never sees the
+session private key, and remaining quota still lives in the registry, not
+in the invite.
+
+`role` and `service` are scoped-invite fields. They need a protocol
+version if they become authoritative. Until then the host can treat every
+subject-bound mint as the `inference` backend and assign the same
+session budget it already inherited from the invitation template.
 
 Quota is host policy, like kick. It is not a number in the signed grant
 and not a count the WASM reports.
@@ -287,8 +363,10 @@ tests.
 
 ## What not to do
 
-- Do not put an invitation fragment, capability, or session key in a public
-  JavaScript bundle, source repo, or CDN asset. That publishes the lock.
+- Do not put a bearer invitation fragment, capability, or session key in a
+  public JavaScript bundle, source repo, or CDN asset. That publishes the
+  lock. A subject-bound mint response is not a bearer secret, but the
+  private key still never leaves the browser.
 - Do not treat CORS, referrers, or allowed origins as the authorization
   boundary. They are not.
 - Do not have the hosted agent mint or log invitations. The host remains
@@ -303,6 +381,9 @@ tests.
   the proxied model call.
 - Do not treat `session_id` as a login. It is one admitted browser. Share
   an invite widely and you mint one budget per successful admission.
+- Do not treat `POST /bootstrap` as authentication. In subject-bound mode
+  anyone who can hit mint can ask for a ticket. Rate-limit it. Never give
+  the public site the host identity key.
 
 ## Phased work
 
@@ -327,7 +408,11 @@ current clients before changing the wire format.
    invite, keyed by `session_id`, enforced on the model backend only.
    Deny the model call; do not put remaining balance in the grant. Count
    from the upstream response.
-6. **Scoped invites (only if needed).** Versioned fields that limit which
+6. **Subject-bound mint.** Host mints a short-lived, single-use invite
+   whose `subject` is the browser’s session public key. Verify that the
+   Admit key matches `subject`. Do not put the host identity key in the
+   public site. Rate-limit the mint; the invite is no longer the secret.
+7. **Scoped invites (only if needed).** Versioned fields that limit which
    backends or paths an invite may use, with the same negative tests as
    today’s grants.
 

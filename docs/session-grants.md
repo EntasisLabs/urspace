@@ -51,6 +51,14 @@ Separating `session_key` from `endpoint_id` allows a browser to create a fresh
 Iroh endpoint after worker eviction while the host continues to recognize the
 same admitted session.
 
+Today’s invitation is a bearer capability: the host mints it first, and the
+browser may present any `session_public_key` at admit. A later subject-bound
+mint, described in [app channels](app-channels.md), reverses that order. The
+browser shows its session public key, the host signs that key into the invite
+as `subject`, and Admit fails closed unless the two match. The challenge and
+proof do not change. The mint endpoint is then the admission policy; the
+invite blob is no longer a transferable secret.
+
 ## Signed grant
 
 The v1 grant payload is a fixed, versioned structure:
