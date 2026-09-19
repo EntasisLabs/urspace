@@ -10,6 +10,10 @@ It is the invitation URL, reused as a client library, and optionally wired
 by one host process so the site and the private backend share a single
 admitted session.
 
+The current secret invite URL stays. Subject-bound mint is a second way
+to enroll, not a replacement. `urspace serve`, short links, `invite` /
+`rotate`, `max-sessions`, and “send someone the link” keep working.
+
 ## The problem
 
 A local agent is easy until the model (or any other private backend) has to
@@ -224,6 +228,35 @@ the existing service worker already carries it. If the site is a public
 shell, the page only needs the host’s public routing data; the SDK then
 runs the handshake below. The key still never enters the bundle.
 
+## Two enrollment modes
+
+After the host admits a client, everything else is the same session:
+grant, proof, kick, quota, named backends. Only the first ticket differs.
+
+| Mode | Who mints | What the client holds | Who can finish admit |
+| --- | --- | --- | --- |
+| **Bearer URL** (today, default) | Host, before anyone connects | A secret invitation URL (capability after `#`) | Anyone who has the unexpired, unused invite |
+| **Subject-bound mint** (app channel) | Host, after seeing a session public key | A short-lived invite whose `subject` is that key | Only the browser that still holds the matching private key |
+
+Bearer URL is the product you already have:
+
+```bash
+urspace serve localhost:8787 --short
+```
+
+The printed link is a temporary password. The bootstrap page never sees
+the fragment as a server-side secret. The visitor’s browser generates a
+`session_key` at Admit, proves it, and gets a grant. Rotating the link
+closes it to newcomers; admitted sessions stay. None of that is removed
+by adding mint.
+
+Use bearer when you want to share access with a person. Use subject-bound
+mint when a public page must enroll itself without putting a transferable
+secret in JavaScript. A host may offer both on the same site identity. An
+invite minted in one mode must not be accepted as the other: a bearer
+capability has no `subject`, and a subject-bound invite is not a URL you
+forward.
+
 ## Subject-bound mint, then the existing challenge
 
 The public-site handshake people draw is this, and it is almost
@@ -384,6 +417,9 @@ tests.
 - Do not treat `POST /bootstrap` as authentication. In subject-bound mode
   anyone who can hit mint can ask for a ticket. Rate-limit it. Never give
   the public site the host identity key.
+- Do not replace the bearer invite URL with mint. The secret link is still
+  how you share a private site with a person. Mint is only for a page that
+  must enroll without a transferable secret.
 
 ## Phased work
 

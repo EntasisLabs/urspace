@@ -52,12 +52,16 @@ Iroh endpoint after worker eviction while the host continues to recognize the
 same admitted session.
 
 Today’s invitation is a bearer capability: the host mints it first, and the
-browser may present any `session_public_key` at admit. A later subject-bound
-mint, described in [app channels](app-channels.md), reverses that order. The
-browser shows its session public key, the host signs that key into the invite
-as `subject`, and Admit fails closed unless the two match. The challenge and
-proof do not change. The mint endpoint is then the admission policy; the
-invite blob is no longer a transferable secret.
+browser may present any `session_public_key` at admit. That URL-as-secret
+mode remains the default and keeps its current CLI and bootstrap behavior.
+
+A later subject-bound mint, described in [app channels](app-channels.md),
+is an additional enrollment path on the same host. The browser shows its
+session public key, the host signs that key into the invite as `subject`,
+and Admit fails closed unless the two match. The challenge and proof do
+not change. The mint endpoint is then the admission policy; that invite
+blob is not a transferable secret. A host may accept both kinds. It must
+not treat a subject-bound invite as a bearer URL, or the reverse.
 
 ## Signed grant
 
