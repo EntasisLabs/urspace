@@ -42,6 +42,9 @@ export function HowItWorks() {
             </li>
           ))}
         </ol>
+        <p className="mt-6 font-[family-name:var(--font-mono)] text-[12px] leading-relaxed tracking-[0.02em] text-[var(--ink-3)]">
+          Invited browser → encrypted path / unreadable relay → loopback app
+        </p>
       </div>
     </section>
   )
