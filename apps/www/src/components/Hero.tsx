@@ -6,13 +6,10 @@ export function Hero() {
   const [copied, setCopied] = useState(false)
 
   async function copyCommand() {
-    try {
-      await navigator.clipboard.writeText(serveCmd)
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 1600)
-    } catch {
-      setCopied(false)
-    }
+    const ok = await copyText(serveCmd)
+    if (!ok) return
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1600)
   }
 
   return (
@@ -82,14 +79,36 @@ export function Hero() {
               <span className="m">localhost:8787 · encrypted</span>
             </ProofBeat>
             <ProofBeat label="Share" status="private url">
-              <span className="w">https://u.urspace.online/#</span>
-              <span className="f">••••••••••••••••••••••••</span>
+              <span className="w">https://u.urspace.online/</span>
+              <span className="f">••••••••••••••••</span>
             </ProofBeat>
           </div>
         </div>
       </div>
     </section>
   )
+}
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    try {
+      const input = document.createElement('textarea')
+      input.value = text
+      input.setAttribute('readonly', '')
+      input.style.position = 'fixed'
+      input.style.left = '-9999px'
+      document.body.appendChild(input)
+      input.select()
+      const ok = document.execCommand('copy')
+      document.body.removeChild(input)
+      return ok
+    } catch {
+      return false
+    }
+  }
 }
 
 function ProofBeat({
