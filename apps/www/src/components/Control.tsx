@@ -8,7 +8,7 @@ const commands = [
 
 export function Control() {
   return (
-    <section id="control" className="border-t border-[var(--line)]">
+    <section id="control" className="border-t border-[var(--line)] bg-[var(--paper-2)]">
       <div className="wrap py-20 sm:py-28">
         <div className="grid gap-12 lg:grid-cols-12 lg:items-start lg:gap-10">
           <div className="min-w-0 lg:col-span-5">

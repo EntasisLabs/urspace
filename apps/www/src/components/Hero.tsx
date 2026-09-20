@@ -1,12 +1,14 @@
 import { useState, type ReactNode } from 'react'
 
 const serveCmd = 'urspace serve localhost:8787'
+const installThenServeCmd =
+  "curl --proto '=https' --tlsv1.2 -fsSL https://github.com/EntasisLabs/urspace/releases/latest/download/install-urspace.sh | bash && ~/.local/bin/urspace serve localhost:8787"
 
 export function Hero() {
   const [copied, setCopied] = useState(false)
 
   async function copyCommand() {
-    const ok = await copyText(serveCmd)
+    const ok = await copyText(installThenServeCmd)
     if (!ok) return
     setCopied(true)
     window.setTimeout(() => setCopied(false), 1600)
@@ -28,9 +30,9 @@ export function Hero() {
             </h1>
 
             <p className="mt-7 max-w-[34rem] text-[17px] leading-[1.6] text-[var(--ink-2)] sm:text-lg">
-              urspace gives the web app running on your machine a private path
-              to an invited browser. One command on your side. One link on
-              theirs.
+              urspace gives the web app running on your machine a private,
+              encrypted path to an invited browser. One command on your side.
+              One link on theirs.
             </p>
 
             <div className="mt-9 flex flex-wrap items-center gap-3">
@@ -40,7 +42,7 @@ export function Hero() {
                 aria-live="polite"
                 className="inline-flex h-11 items-center rounded-md bg-[var(--ink)] px-5 text-[14px] font-medium text-white transition-[background-color,transform] duration-150 hover:bg-[var(--dark-3)] active:scale-[0.99]"
               >
-                {copied ? 'Copied' : 'Copy the command'}
+                {copied ? 'Copied' : 'Copy install + serve'}
               </button>
               <a
                 href="#install"
@@ -76,7 +78,7 @@ export function Hero() {
                 <span className="text-[var(--signal)]">●</span> Private link ready
               </span>
               {'\n'}
-              <span className="m">localhost:8787 · encrypted</span>
+              <span className="m">localhost:8787 · encrypted end to end</span>
             </ProofBeat>
             <ProofBeat label="Share" status="private url">
               <span className="w">https://u.urspace.online/</span>

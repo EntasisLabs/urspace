@@ -3,6 +3,7 @@ import { BrandWordmark } from './BrandMark'
 
 const links = [
   { href: '#how', label: 'How' },
+  { href: '#boundaries', label: 'Boundaries' },
   { href: '#control', label: 'Control' },
   {
     href: 'https://github.com/EntasisLabs/urspace',

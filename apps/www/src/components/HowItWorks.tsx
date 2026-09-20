@@ -15,7 +15,7 @@ const steps = [
     n: '03',
     who: 'Both',
     title: 'Talk privately.',
-    body: 'It ends when you stop.',
+    body: 'Encrypted end to end. Only host and guest can read it.',
   },
 ]
 
