@@ -107,7 +107,8 @@
     line-height: 1.7;
     color: var(--dark-text);
     white-space: pre-wrap;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
+    word-break: normal;
     tab-size: 2;
   }
   @media (min-width: 640px) {

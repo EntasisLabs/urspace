@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { BrandWordmark } from './BrandMark'
 
 const installCmd = `curl --proto '=https' --tlsv1.2 -fsSL \\
@@ -44,7 +44,12 @@ export function Install() {
               .
             </p>
             <p className="mt-4 max-w-sm text-[15.5px] leading-relaxed text-[var(--dark-muted)]">
-              When you are done, press Ctrl+C. The site is gone.
+              When you are done, press Ctrl+C. The site is gone. Need it to
+              outlive the terminal?{' '}
+              <code className="font-[family-name:var(--font-mono)] text-[0.92em] text-[var(--dark-text)]">
+                urspace service
+              </code>{' '}
+              keeps a share running.
             </p>
             <p className="mt-6 text-[13px] leading-relaxed text-[var(--dark-faint)]">
               Early preview. Chrome and Chromium-based browsers are the main
@@ -68,7 +73,12 @@ export function Install() {
               command={installCmd}
               copied={copied === 'install'}
               onCopy={() => copy(installCmd, 'install')}
-            />
+            >
+              curl --proto '=https' --tlsv1.2 -fsSL \
+              {'\n  '}
+              https://github.com/<wbr />EntasisLabs/<wbr />urspace/<wbr />releases/<wbr />latest/<wbr />download/<wbr />install-urspace.sh \
+              {'\n  '}| bash
+            </CommandBlock>
             <CommandBlock
               step="2"
               label="Share"
@@ -89,12 +99,14 @@ function CommandBlock({
   command,
   copied,
   onCopy,
+  children,
 }: {
   step: string
   label: string
   command: string
   copied: boolean
   onCopy: () => void
+  children?: ReactNode
 }) {
   return (
     <div className="overflow-hidden rounded-[10px] border border-[var(--dark-line)] bg-[var(--dark-2)]">
@@ -114,7 +126,7 @@ function CommandBlock({
       </div>
       <pre className="term overflow-x-auto px-4 py-4 sm:px-5">
         <code>
-          <span className="p">$</span> {command}
+          <span className="p">$</span> {children ?? command}
         </code>
       </pre>
     </div>

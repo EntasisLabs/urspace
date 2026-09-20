@@ -2,23 +2,23 @@ const boundaries = [
   {
     n: '01',
     title: 'Loopback, and only loopback.',
-    body: 'The host forwards to 127.0.0.1, ::1, or localhost. It refuses credentials, paths, and any other address, so it cannot be pointed at your LAN or the internet.',
+    body: 'The host only forwards to 127.0.0.1, ::1, or localhost. It refuses any other address, so it cannot be pointed at your LAN or the internet.',
   },
   {
     n: '02',
     title: 'The invitation is the key.',
-    body: 'Fresh and random on every share. It expires on a timer you set, admits a fixed number of browsers, and can be rotated at any moment. Whoever holds it may knock.',
+    body: 'Fresh and random on every share. It expires on a timer you set, admits a fixed number of browsers, and can be replaced at any moment.',
   },
   {
     n: '03',
     title: 'Secrets stay off the disk.',
-    body: 'Invitations, capabilities, and browser keys are never written to a log or a journal. What persists is hashes, limits, and revocation state.',
+    body: 'Invitations and guest keys are never written to a log or a journal. What remains are limits and who you already admitted.',
   },
 ]
 
-export function Principles() {
+export function Boundaries() {
   return (
-    <section id="why" className="border-t border-[var(--line)] bg-[var(--paper-2)]">
+    <section id="boundaries" className="border-t border-[var(--line)]">
       <div className="wrap py-20 sm:py-28">
         <div className="grid gap-10 lg:grid-cols-12">
           <div className="lg:col-span-4">
@@ -27,8 +27,8 @@ export function Principles() {
               Narrow on purpose.
             </h2>
             <p className="mt-5 max-w-sm text-[15.5px] leading-relaxed text-[var(--ink-2)]">
-              Every decision starts from one question: what does the host
-              expose, and to whom?
+              What does the host expose, and to whom? Traffic is encrypted end
+              to end. Only host and guest can read it.
             </p>
           </div>
 

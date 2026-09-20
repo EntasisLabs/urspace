@@ -1,10 +1,8 @@
 import { Nav } from './components/Nav'
 import { Hero } from './components/Hero'
-import { Principles } from './components/Principles'
-import { Control } from './components/Control'
 import { HowItWorks } from './components/HowItWorks'
-import { Modes } from './components/Modes'
-import { Devices } from './components/Devices'
+import { Boundaries } from './components/Boundaries'
+import { Control } from './components/Control'
 import { Position } from './components/Position'
 import { Install } from './components/Install'
 import { Footer } from './components/Footer'
@@ -16,10 +14,8 @@ export default function App() {
       <main>
         <Hero />
         <HowItWorks />
+        <Boundaries />
         <Control />
-        <Principles />
-        <Modes />
-        <Devices />
         <Position />
         <Install />
       </main>
