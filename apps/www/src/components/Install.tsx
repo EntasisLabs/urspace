@@ -44,7 +44,12 @@ export function Install() {
               .
             </p>
             <p className="mt-4 max-w-sm text-[15.5px] leading-relaxed text-[var(--dark-muted)]">
-              When you are done, press Ctrl+C. The site is gone.
+              When you are done, press Ctrl+C. The site is gone. Need it to
+              outlive the terminal?{' '}
+              <code className="font-[family-name:var(--font-mono)] text-[0.92em] text-[var(--dark-text)]">
+                urspace service
+              </code>{' '}
+              keeps a share running.
             </p>
             <p className="mt-6 text-[13px] leading-relaxed text-[var(--dark-faint)]">
               Early preview. Chrome and Chromium-based browsers are the main

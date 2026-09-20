@@ -146,11 +146,6 @@
     animation: pulse-dot 2.4s ease-out infinite;
   }
 
-  .compare td,
-  .compare th {
-    vertical-align: top;
-  }
-
   @media (prefers-reduced-motion: reduce) {
     .caret,
     .live {
